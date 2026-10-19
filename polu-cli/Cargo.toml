@@ -1,0 +1,7 @@
+[package]
+name = "polu-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+polu-core = {path = "../polu-core"}
