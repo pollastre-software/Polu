@@ -1,10 +1,7 @@
-use std::error::Error;
+use crate::core::BoxError;
+use crate::core::types::Assignment;
 
-pub trait Store<T> {
-    ///
-    /// Something that can store T. Any detail parameters should be owned by the implementor of this trait
-    ///
-    type Error: Error + Default;
-
-    fn store(&self, data: &T) -> Result<(), Self::Error>;
+/// Something that can store a solved assignment. Any detail parameters should be owned by the implementor of this trait
+pub trait Store {
+    fn store(&self, assignment: &Assignment) -> Result<(), BoxError>;
 }
