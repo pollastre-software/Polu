@@ -1,11 +1,17 @@
 mod core;
-pub mod load;
+mod load;
+#[cfg(feature = "highs")]
 mod solver;
 mod store;
 
+// pipeline
+pub use crate::core::{BoxError, Polu, PoluError};
+// ports, implemented by adapters
 pub use crate::core::traits::{Load, Solver, Store};
-pub use crate::core::types::{
-    Assignment, CostMap, CostRule, Flow, Header, Key, Problem, Route, SLOTS, Sink, SinkList,
-    Source, SourceList, Table,
-};
-pub use crate::core::{BoxError, Polu, PoluError, formulate};
+// inputs (what loaders build)
+pub use crate::core::types::{CostMap, CostRule, Header, Key, SinkList, SourceList, Table};
+// solver contract (what solvers read and return, and stores read)
+pub use crate::core::types::{Assignment, Flow, Problem, Route};
+
+#[cfg(feature = "highs")]
+pub use solver::HighsSolver;

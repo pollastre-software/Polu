@@ -59,6 +59,7 @@ pub fn formulate(
         ));
     }
 
+    // build C^t from the costmap, this is N^2, will need to profile if it's too slow
     let mut routes = Vec::new();
     for (i, (source, _)) in sources.rows().iter().enumerate() {
         for (j, (sink, _)) in sinks.rows().iter().enumerate() {
@@ -80,6 +81,8 @@ pub fn formulate(
 }
 
 /// The load -> formulate -> solve -> store pipeline, over swappable adapters.
+/// Ideally this doesn't use dyn to be faster, I think it's premature optimization at this point
+/// TODO check how to swap adapters on the fly, maybe not needed for the core but for adapters/implementors yes
 pub struct Polu {
     source_loader: Box<dyn Load<SourceList>>,
     sink_loader: Box<dyn Load<SinkList>>,
@@ -109,7 +112,8 @@ impl Polu {
         }
     }
 
-    /// Loads all inputs and formulates the problem. Clears any previous solution.
+    /// Call each adapter to load the data and transform into the problem statement data type (MIP)
+    /// Could wire in something to look at the loaded data in the core before run
     pub fn load_data(&mut self) -> Result<&Problem, PoluError> {
         let sources = self.source_loader.load().map_err(PoluError::Load)?;
         let sinks = self.sink_loader.load().map_err(PoluError::Load)?;
@@ -119,6 +123,8 @@ impl Polu {
         Ok(self.problem.insert(formulate(&sources, &sinks, &costmap)?))
     }
 
+    /// runs the assigner and stores the assignment data
+    /// also could wire in a view before saving
     pub fn run(&mut self) -> Result<&Assignment, PoluError> {
         let problem = self
             .problem
