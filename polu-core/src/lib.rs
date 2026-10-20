@@ -13,7 +13,7 @@ pub use crate::core::types::{
     CostMap, CostRule, Header, Key, Layer, Op, SinkList, SourceList, Table,
 };
 // solver contract (what solvers read and return, and stores read)
-pub use crate::core::types::{Assignment, Flow, Problem, Route};
+pub use crate::core::types::{Assignment, Flow, Limit, Problem, Route};
 
 #[cfg(feature = "highs")]
 pub use solver::HighsSolver;

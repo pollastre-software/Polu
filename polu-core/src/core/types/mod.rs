@@ -8,6 +8,8 @@ use std::collections::HashSet;
 use crate::core::PoluError;
 
 pub use costmap::{CostMap, CostRule, Layer, Op};
+
+use costmap::RowIndex;
 pub use sink::{Sink, SinkList};
 pub use source::{Source, SourceList};
 
@@ -78,6 +80,19 @@ impl Table {
     pub fn rows(&self) -> &[(Key, i64)] {
         &self.rows
     }
+
+    /// For each row, the other rows it covers: those with the same value in every slot it sets.
+    /// A row with only a business name covers every row of that business.
+    pub fn covered(&self) -> Vec<Vec<usize>> {
+        let index = RowIndex::new(self);
+        (0..self.rows.len())
+            .map(|i| {
+                let mut rows = index.rows_matching(&self.rows[i].0, false);
+                rows.retain(|&r| r != i);
+                rows
+            })
+            .collect()
+    }
 }
 
 /// A usable source/sink pair and its unit cost. Indices point into the source and sink tables.
@@ -88,13 +103,21 @@ pub struct Route {
     pub cost: f64,
 }
 
+/// Bound on the total flow through a group of table rows: one row plus every row it covers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Limit {
+    pub rows: Vec<usize>,
+    pub amount: i64,
+}
+
 /// Solver-neutral transport problem: minimise the sum of cost * flow over `routes`, with integer flows,
-/// total flow out of source i `<= supply[i]` and total flow into sink j `== demand[j]`.
+/// total flow out of the rows of each `supply` limit `<= amount` and total flow into the rows of each
+/// `demand` limit `== amount`. `supply[i]` and `demand[j]` belong to source row i and sink row j.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Problem {
     pub routes: Vec<Route>,
-    pub supply: Vec<i64>,
-    pub demand: Vec<i64>,
+    pub supply: Vec<Limit>,
+    pub demand: Vec<Limit>,
 }
 
 /// Units sent along one route.

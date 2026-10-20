@@ -41,12 +41,13 @@ pub struct Layer {
     pub rules: Vec<CostRule>,
 }
 
-/// Layers applied in order, e.g. a `Set` base cost, then `Scale` preferences, then a `Block` list.
+/// An optional base cost per pair, then layers applied in order, e.g. `Scale` preferences, then a `Block` list.
 /// The rule keys use the same slot layout as the source and sink headers.
 #[derive(Debug, Clone)]
 pub struct CostMap {
     source_header: Header,
     sink_header: Header,
+    base: Option<Vec<f64>>,
     layers: Vec<Layer>,
 }
 
@@ -70,8 +71,24 @@ impl CostMap {
         Ok(Self {
             source_header,
             sink_header,
+            base: None,
             layers,
         })
+    }
+
+    /// Starts from one cost per pair (e.g. a distance), row-major `sources × sinks` in table row order,
+    /// instead of from no routes. `NaN` marks a pair that can't be used. Much faster than one `Set`
+    /// rule per pair. The size is checked against the tables when the costmap is resolved.
+    pub fn with_base(mut self, costs: Vec<f64>) -> Result<Self, PoluError> {
+        if let Some(c) = costs.iter().position(|c| c.is_infinite()) {
+            return Err(PoluError::Invalid(format!("base cost {c} is infinite")));
+        }
+        self.base = Some(costs);
+        Ok(self)
+    }
+
+    pub fn base(&self) -> Option<&[f64]> {
+        self.base.as_deref()
     }
 
     pub fn source_header(&self) -> &Header {
@@ -89,9 +106,9 @@ impl CostMap {
     /// Cost of every source/sink pair, row-major (`sources × sinks`). `NaN` means the pair can't be used.
     ///
     /// Each rule's matching rows come from per-slot bitsets, and rules are painted lowest rank first,
-    /// so the winner of each pair is painted last. Work grows with the cells rules touch,
-    /// not with `pairs × rules`.
-    pub fn resolve(&self, sources: &Table, sinks: &Table) -> Vec<f64> {
+    /// so the winner of each pair is painted last. Each layer only visits the cells its rules touch,
+    /// so work grows with those cells, not with `pairs × rules` or `pairs × layers`.
+    pub fn resolve(&self, sources: &Table, sinks: &Table) -> Result<Vec<f64>, PoluError> {
         let (source_index, sink_index) = (RowIndex::new(sources), RowIndex::new(sinks));
         // rules often repeat patterns (e.g. a base layer with one rule per pair), so masks are cached
         let mut source_rows: HashMap<&Key, Vec<usize>> = HashMap::new();
@@ -99,15 +116,25 @@ impl CostMap {
 
         let nk = sinks.rows().len();
         let cells = sources.rows().len() * nk;
-        let mut cost = vec![f64::NAN; cells];
+        let mut cost = match &self.base {
+            Some(base) if base.len() != cells => {
+                return Err(PoluError::Invalid(format!(
+                    "base has {} costs, expected {cells} (sources × sinks)",
+                    base.len()
+                )));
+            }
+            Some(base) => base.clone(),
+            None => vec![f64::NAN; cells],
+        };
         let mut blocked = vec![false; cells];
+        // winning value per cell for the current layer, and the cells painted so far in it
         let mut winner = vec![f64::NAN; cells];
+        let mut touched = Vec::new();
 
         for layer in &self.layers {
             let mut order: Vec<(usize, &CostRule)> = layer.rules.iter().enumerate().collect();
             order.sort_by_cached_key(|(i, r)| (r.priority, r.specificity(), std::cmp::Reverse(*i)));
 
-            winner.fill(f64::NAN);
             for (_, rule) in order {
                 // values are finite (checked in new), so NaN keeps meaning "not painted"
                 let value = if layer.op == Op::Block {
@@ -117,21 +144,24 @@ impl CostMap {
                 };
                 let ss = source_rows
                     .entry(&rule.source)
-                    .or_insert_with(|| source_index.rows_matching(&rule.source));
+                    .or_insert_with(|| source_index.rows_matching(&rule.source, true));
                 let ks = sink_rows
                     .entry(&rule.sink)
-                    .or_insert_with(|| sink_index.rows_matching(&rule.sink));
+                    .or_insert_with(|| sink_index.rows_matching(&rule.sink, true));
                 for &i in ss.iter() {
-                    let row = &mut winner[i * nk..(i + 1) * nk];
                     for &j in ks.iter() {
-                        row[j] = value;
+                        let c = i * nk + j;
+                        if winner[c].is_nan() {
+                            touched.push(c);
+                        }
+                        winner[c] = value;
                     }
                 }
             }
 
-            for c in 0..cells {
-                let w = winner[c];
-                if w.is_nan() || blocked[c] {
+            for c in touched.drain(..) {
+                let w = std::mem::replace(&mut winner[c], f64::NAN);
+                if blocked[c] {
                     continue;
                 }
                 match layer.op {
@@ -145,25 +175,24 @@ impl CostMap {
                 }
             }
         }
-        cost
+        Ok(cost)
     }
 }
 
-/// Rows carrying each value of one slot, as bitsets. Rows with the slot empty are in `empty`,
-/// and also in every value's bitset, since an empty slot matches any value.
+/// Rows carrying each value of one slot, as bitsets, and the rows with the slot empty.
 struct SlotIndex<'a> {
     empty: Vec<u64>,
     values: HashMap<&'a str, Vec<u64>>,
 }
 
 /// Per-slot bitset indexes over a table's rows.
-struct RowIndex<'a> {
+pub(super) struct RowIndex<'a> {
     rows: usize,
     slots: Vec<SlotIndex<'a>>,
 }
 
 impl<'a> RowIndex<'a> {
-    fn new(table: &'a Table) -> Self {
+    pub(super) fn new(table: &'a Table) -> Self {
         let rows = table.rows().len();
         let words = rows.div_ceil(64);
         let slots = (0..SLOTS)
@@ -177,26 +206,25 @@ impl<'a> RowIndex<'a> {
                     };
                     bits[i / 64] |= 1 << (i % 64);
                 }
-                for bits in values.values_mut() {
-                    bits.iter_mut().zip(&empty).for_each(|(b, e)| *b |= e);
-                }
                 SlotIndex { empty, values }
             })
             .collect();
         Self { rows, slots }
     }
 
-    /// Rows matching `pattern`: the AND of the bitsets of its set slots.
-    fn rows_matching(&self, pattern: &Key) -> Vec<usize> {
+    /// Rows agreeing with every set slot of `pattern`: the AND of those slots' bitsets.
+    /// With `loose`, a row's empty slot also agrees with any value (as in `Key::matches`).
+    pub(super) fn rows_matching(&self, pattern: &Key, loose: bool) -> Vec<usize> {
         let mut mask: Option<Vec<u64>> = None; // None: every row
         for (slot, value) in self.slots.iter().zip(&pattern.0) {
             let Some(v) = value.as_deref() else {
                 continue;
             };
-            let bits = slot.values.get(v).unwrap_or(&slot.empty);
+            let raw = slot.values.get(v);
+            let word = |w: usize| raw.map_or(0, |r| r[w]) | if loose { slot.empty[w] } else { 0 };
             match &mut mask {
-                None => mask = Some(bits.clone()),
-                Some(m) => m.iter_mut().zip(bits).for_each(|(m, b)| *m &= b),
+                None => mask = Some((0..slot.empty.len()).map(word).collect()),
+                Some(m) => m.iter_mut().enumerate().for_each(|(w, m)| *m &= word(w)),
             }
         }
         let Some(mask) = mask else {

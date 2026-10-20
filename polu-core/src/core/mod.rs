@@ -4,7 +4,7 @@ pub(crate) mod types;
 use std::{error::Error, fmt};
 
 use traits::{Load, Solver, Store};
-use types::{Assignment, CostMap, Problem, Route, SinkList, SourceList};
+use types::{Assignment, CostMap, Limit, Problem, Route, SinkList, SourceList, Table};
 
 /// Error type returned by every adapter (loaders, solvers, stores).
 pub type BoxError = Box<dyn Error + Send + Sync>;
@@ -62,7 +62,7 @@ pub fn formulate(
     // build C^t from the costmap, this is N^2, will need to profile if it's too slow
     let nk = sinks.rows().len();
     let mut routes = Vec::new();
-    for (c, &cost) in costmap.resolve(sources, sinks).iter().enumerate() {
+    for (c, &cost) in costmap.resolve(sources, sinks)?.iter().enumerate() {
         if cost.is_nan() {
             continue;
         }
@@ -82,9 +82,27 @@ pub fn formulate(
 
     Ok(Problem {
         routes,
-        supply: sources.rows().iter().map(|(_, qty)| *qty).collect(),
-        demand: sinks.rows().iter().map(|(_, qty)| *qty).collect(),
+        supply: limits(sources),
+        demand: limits(sinks),
     })
+}
+
+/// One limit per row, over the row and every row it covers, so a partial row (e.g. business name only)
+/// bounds the total of the more specific rows under it and can still take the remainder itself.
+fn limits(table: &Table) -> Vec<Limit> {
+    table
+        .covered()
+        .into_iter()
+        .zip(table.rows())
+        .enumerate()
+        .map(|(i, (mut rows, (_, amount)))| {
+            rows.insert(0, i);
+            Limit {
+                rows,
+                amount: *amount,
+            }
+        })
+        .collect()
 }
 
 /// The load -> formulate -> solve -> store pipeline, over swappable adapters.
@@ -205,7 +223,7 @@ mod tests {
     fn cost_of(cm: &CostMap, source: Key, sink: Key) -> Option<f64> {
         let sources = Table::new(header(&["region", "site"]), vec![(source, 1)]).unwrap();
         let sinks = Table::new(header(&["region", "store"]), vec![(sink, 1)]).unwrap();
-        Some(cm.resolve(&sources, &sinks)[0]).filter(|c| !c.is_nan())
+        Some(cm.resolve(&sources, &sinks).unwrap()[0]).filter(|c| !c.is_nan())
     }
 
     fn sources() -> SourceList {
@@ -282,8 +300,9 @@ mod tests {
                 }
             ]
         );
-        assert_eq!(problem.supply, vec![10, 5]);
-        assert_eq!(problem.demand, vec![4, 6]);
+        let amounts = |limits: &[Limit]| limits.iter().map(|l| l.amount).collect::<Vec<_>>();
+        assert_eq!(amounts(&problem.supply), [10, 5]);
+        assert_eq!(amounts(&problem.demand), [4, 6]);
     }
 
     #[test]
@@ -367,6 +386,7 @@ mod tests {
     /// Resolved costs, row-major, with `None` for pairs that can't be used.
     fn costs(cm: &CostMap, sources: &SourceList, sinks: &SinkList) -> Vec<Option<f64>> {
         cm.resolve(sources, sinks)
+            .unwrap()
             .into_iter()
             .map(|c| Some(c).filter(|c| !c.is_nan()))
             .collect()
@@ -448,9 +468,12 @@ mod tests {
     /// Reference: evaluates every layer for every pair with `Key::matches`, no indexes.
     fn naive(cm: &CostMap, sources: &Table, sinks: &Table) -> Vec<f64> {
         let mut out = Vec::new();
-        for (s, _) in sources.rows() {
-            for (k, _) in sinks.rows() {
-                let (mut cost, mut blocked) = (f64::NAN, false);
+        for (i, (s, _)) in sources.rows().iter().enumerate() {
+            for (j, (k, _)) in sinks.rows().iter().enumerate() {
+                let start = cm
+                    .base()
+                    .map_or(f64::NAN, |b| b[i * sinks.rows().len() + j]);
+                let (mut cost, mut blocked) = (start, false);
                 for layer in cm.layers() {
                     let winner = layer
                         .rules
@@ -473,6 +496,119 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn base_matrix_is_the_starting_cost() {
+        let (sources, sinks, _) = apples();
+        let cm = layered(vec![
+            (Op::Scale, vec![rule(&["bananas and more"], &["*"], 0, 2.0)]),
+            (
+                Op::Block,
+                vec![rule(&["apple inc"], &["stores and us"], 0, 0.0)],
+            ),
+        ])
+        .with_base(vec![2.0, 1.0, 1.0, f64::NAN])
+        .unwrap();
+        assert_eq!(
+            costs(&cm, &sources, &sinks),
+            [None, Some(1.0), Some(2.0), None]
+        );
+    }
+
+    #[test]
+    fn base_matrix_must_fit_the_tables() {
+        let cm = costmap(vec![]).with_base(vec![1.0; 3]).unwrap();
+        assert!(matches!(
+            formulate(&sources(), &sinks(), &cm),
+            Err(PoluError::Invalid(_))
+        ));
+        assert!(costmap(vec![]).with_base(vec![f64::INFINITY]).is_err());
+    }
+
+    #[test]
+    fn partial_rows_limit_the_rows_they_cover() {
+        let sources = Table::new(
+            header(&["region", "site"]),
+            vec![
+                (key(&["apple inc", "large"]), 3),
+                (key(&["apple inc"]), 5),
+                (key(&["bananas and more", "large"]), 4),
+                (key(&["*", "large"]), 6),
+            ],
+        )
+        .unwrap();
+        let cm = costmap(vec![rule(&["*"], &["*"], 0, 1.0)]);
+        let problem = formulate(&sources, &sinks(), &cm).unwrap();
+        let rows = |limits: &[Limit]| limits.iter().map(|l| l.rows.clone()).collect::<Vec<_>>();
+        // [apple inc, *] covers [apple inc, large]; [*, large] covers both large rows
+        assert_eq!(
+            rows(&problem.supply),
+            [vec![0], vec![1, 0], vec![2], vec![3, 0, 2]]
+        );
+        assert_eq!(rows(&problem.demand), [vec![0], vec![1]]);
+    }
+
+    /// Business total 5 over [large] = 3 and [small] = 7: at most 5 apple inc units ship in total,
+    /// while each size keeps its own cost.
+    #[cfg(feature = "highs")]
+    #[test]
+    fn business_total_caps_every_row_it_covers() {
+        use crate::solver::HighsSolver;
+
+        let sources = Table::new(
+            header(&["region", "site"]),
+            vec![
+                (key(&["apple inc"]), 5),
+                (key(&["apple inc", "large"]), 3),
+                (key(&["apple inc", "small"]), 7),
+                (key(&["bananas and more"]), 20),
+            ],
+        )
+        .unwrap();
+        let sinks = |demand| {
+            Table::new(
+                header(&["region", "store"]),
+                vec![(key(&["ohio fruits"]), demand)],
+            )
+            .unwrap()
+        };
+        let cm = costmap(vec![
+            rule(&["apple inc"], &["*"], 0, 3.0),
+            rule(&["apple inc", "large"], &["*"], 0, 1.0),
+            rule(&["apple inc", "small"], &["*"], 0, 2.0),
+            rule(&["bananas and more"], &["*"], 0, 10.0),
+        ]);
+
+        let problem = formulate(&sources, &sinks(9), &cm).unwrap();
+        // the business limit spans all three apple inc rows; each size row keeps its own cost
+        assert_eq!(
+            problem.supply[0],
+            Limit {
+                rows: vec![0, 1, 2],
+                amount: 5
+            }
+        );
+        let route_costs: Vec<f64> = problem.routes[1..].iter().map(|r| r.cost).collect();
+        assert_eq!(route_costs, [1.0, 2.0, 10.0]);
+
+        // 9 demanded: apple inc rows are cheaper but capped at 5 together, bananas and more covers 4
+        let a = HighsSolver::default().solve(&problem).unwrap();
+        let shipped = |rows: &[usize]| -> i64 {
+            a.flows
+                .iter()
+                .filter(|f| rows.contains(&f.source))
+                .map(|f| f.units)
+                .sum()
+        };
+        assert_eq!(shipped(&[0, 1, 2]), 5);
+        assert_eq!(shipped(&[3]), 4);
+
+        // without bananas and more, 9 can't be met: 3 + 7 looks available, but the cap is 5
+        let apples_only =
+            Table::new(header(&["region", "site"]), sources.rows()[..3].to_vec()).unwrap();
+        let problem = formulate(&apples_only, &sinks(9), &cm).unwrap();
+        assert!(HighsSolver::default().solve(&problem).is_err());
     }
 
     struct Rng(u64);
@@ -527,8 +663,20 @@ mod tests {
             let ops = [Op::Set, Op::Scale, Op::Add, Op::Block, Op::Set];
             let layers = ops.iter().map(|&op| rng.layer(op)).collect();
             let h = header(&["a", "b", "c"]);
-            let cm = CostMap::new(h.clone(), h, layers).unwrap();
-            let (fast, slow) = (cm.resolve(&sources, &sinks), naive(&cm, &sources, &sinks));
+            let mut cm = CostMap::new(h.clone(), h, layers).unwrap();
+            if rng.below(2) == 0 {
+                // half the runs start from a base matrix, with some pairs unusable
+                let cells = sources.rows().len() * sinks.rows().len();
+                let base = (0..cells)
+                    .map(|_| match rng.below(5) {
+                        0 => f64::NAN,
+                        n => n as f64,
+                    })
+                    .collect();
+                cm = cm.with_base(base).unwrap();
+            }
+            let fast = cm.resolve(&sources, &sinks).unwrap();
+            let slow = naive(&cm, &sources, &sinks);
             assert!(
                 fast.iter()
                     .zip(&slow)
@@ -561,9 +709,9 @@ mod tests {
                 flows.push(Flow {
                     source: route.source,
                     sink: j,
-                    units: *demand,
+                    units: demand.amount,
                 });
-                objective += route.cost * *demand as f64;
+                objective += route.cost * demand.amount as f64;
             }
             Ok(Assignment { flows, objective })
         }
