@@ -40,8 +40,8 @@ impl Error for PoluError {
     }
 }
 
-/// Builds the transport problem. Every source/sink pair with a matching cost rule becomes a route;
-/// pairs without one can't be used. Add a catch-all rule (all slots `None`, lowest priority) to allow
+/// Builds the transport problem. Every source/sink pair the costmap gives a cost becomes a route;
+/// pairs without one can't be used. Add a catch-all `Set` rule (all slots `None`, lowest priority) to allow
 /// any pair at a penalty cost instead.
 pub fn formulate(
     sources: &SourceList,
@@ -60,17 +60,24 @@ pub fn formulate(
     }
 
     // build C^t from the costmap, this is N^2, will need to profile if it's too slow
+    let nk = sinks.rows().len();
     let mut routes = Vec::new();
-    for (i, (source, _)) in sources.rows().iter().enumerate() {
-        for (j, (sink, _)) in sinks.rows().iter().enumerate() {
-            if let Some(cost) = costmap.resolve(source, sink) {
-                routes.push(Route {
-                    source: i,
-                    sink: j,
-                    cost,
-                });
-            }
+    for (c, &cost) in costmap.resolve(sources, sinks).iter().enumerate() {
+        if cost.is_nan() {
+            continue;
         }
+        if !cost.is_finite() {
+            return Err(PoluError::Invalid(format!(
+                "cost for source {} and sink {} overflowed",
+                c / nk,
+                c % nk
+            )));
+        }
+        routes.push(Route {
+            source: c / nk,
+            sink: c % nk,
+            cost,
+        });
     }
 
     Ok(Problem {
@@ -148,7 +155,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
-    use types::{CostRule, Flow, Header, Key, SLOTS, Table};
+    use types::{CostRule, Flow, Header, Key, Layer, Op, SLOTS, Table};
 
     /// Builds a key from slot values; "*" leaves a slot empty.
     fn key(values: &[&str]) -> Key {
@@ -167,22 +174,38 @@ mod tests {
         h
     }
 
-    fn rule(source: &[&str], sink: &[&str], priority: i8, cost: f64) -> CostRule {
+    fn rule(source: &[&str], sink: &[&str], priority: i8, value: f64) -> CostRule {
         CostRule {
             source: key(source),
             sink: key(sink),
             priority,
-            cost,
+            value,
         }
     }
 
-    fn costmap(rules: Vec<CostRule>) -> CostMap {
+    fn layered(layers: Vec<(Op, Vec<CostRule>)>) -> CostMap {
+        let layers = layers
+            .into_iter()
+            .map(|(op, rules)| Layer { op, rules })
+            .collect();
         CostMap::new(
             header(&["region", "site"]),
             header(&["region", "store"]),
-            rules,
+            layers,
         )
         .unwrap()
+    }
+
+    /// A costmap with a single `Set` layer.
+    fn costmap(rules: Vec<CostRule>) -> CostMap {
+        layered(vec![(Op::Set, rules)])
+    }
+
+    /// Cost of one source/sink pair, resolved on its own.
+    fn cost_of(cm: &CostMap, source: Key, sink: Key) -> Option<f64> {
+        let sources = Table::new(header(&["region", "site"]), vec![(source, 1)]).unwrap();
+        let sinks = Table::new(header(&["region", "store"]), vec![(sink, 1)]).unwrap();
+        Some(cm.resolve(&sources, &sinks)[0]).filter(|c| !c.is_nan())
     }
 
     fn sources() -> SourceList {
@@ -208,7 +231,7 @@ mod tests {
             rule(&["*"], &["*"], 1, 9.0),
         ]);
         assert_eq!(
-            cm.resolve(&key(&["N", "w1"]), &key(&["N", "s1"])),
+            cost_of(&cm, key(&["N", "w1"]), key(&["N", "s1"])),
             Some(9.0)
         );
     }
@@ -220,7 +243,7 @@ mod tests {
             rule(&["N", "w1"], &["N"], 0, 2.0),
         ]);
         assert_eq!(
-            cm.resolve(&key(&["N", "w1"]), &key(&["N", "s1"])),
+            cost_of(&cm, key(&["N", "w1"]), key(&["N", "s1"])),
             Some(2.0)
         );
     }
@@ -232,7 +255,7 @@ mod tests {
             rule(&["*"], &["N"], 0, 4.0),
         ]);
         assert_eq!(
-            cm.resolve(&key(&["N", "w1"]), &key(&["N", "s1"])),
+            cost_of(&cm, key(&["N", "w1"]), key(&["N", "s1"])),
             Some(3.0)
         );
     }
@@ -295,9 +318,12 @@ mod tests {
 
     #[test]
     fn non_finite_costs_are_rejected() {
-        let rules = vec![rule(&["*"], &["*"], 0, f64::INFINITY)];
+        let layers = vec![Layer {
+            op: Op::Set,
+            rules: vec![rule(&["*"], &["*"], 0, f64::INFINITY)],
+        }];
         assert!(matches!(
-            CostMap::new(header(&["a"]), header(&["b"]), rules),
+            CostMap::new(header(&["a"]), header(&["b"]), layers),
             Err(PoluError::Invalid(_))
         ));
     }
@@ -309,6 +335,206 @@ mod tests {
             formulate(&sources(), &sinks(), &cm),
             Err(PoluError::Invalid(_))
         ));
+    }
+
+    /// The apples example: a base cost per pair, then a block.
+    fn apples() -> (SourceList, SinkList, Vec<CostRule>) {
+        let sources = Table::new(
+            header(&["region", "site"]),
+            vec![
+                (key(&["apple inc", "NY"]), 7),
+                (key(&["bananas and more", "SF"]), 5),
+            ],
+        )
+        .unwrap();
+        let sinks = Table::new(
+            header(&["region", "store"]),
+            vec![
+                (key(&["stores and us", "WA"]), 3),
+                (key(&["ohio fruits", "OH"]), 4),
+            ],
+        )
+        .unwrap();
+        let base = vec![
+            rule(&["apple inc"], &["stores and us"], 0, 2.0),
+            rule(&["apple inc"], &["ohio fruits"], 0, 1.0),
+            rule(&["bananas and more"], &["stores and us"], 0, 1.0),
+            rule(&["bananas and more"], &["ohio fruits"], 0, 3.0),
+        ];
+        (sources, sinks, base)
+    }
+
+    /// Resolved costs, row-major, with `None` for pairs that can't be used.
+    fn costs(cm: &CostMap, sources: &SourceList, sinks: &SinkList) -> Vec<Option<f64>> {
+        cm.resolve(sources, sinks)
+            .into_iter()
+            .map(|c| Some(c).filter(|c| !c.is_nan()))
+            .collect()
+    }
+
+    #[test]
+    fn block_removes_a_route() {
+        let (sources, sinks, base) = apples();
+        let cm = layered(vec![
+            (Op::Set, base),
+            (
+                Op::Block,
+                vec![rule(&["apple inc"], &["stores and us"], 0, 0.0)],
+            ),
+        ]);
+        assert_eq!(
+            costs(&cm, &sources, &sinks),
+            [None, Some(1.0), Some(1.0), Some(3.0)]
+        );
+    }
+
+    #[test]
+    fn block_is_final() {
+        let (sources, sinks, base) = apples();
+        let cm = layered(vec![
+            (Op::Set, base),
+            (Op::Block, vec![rule(&["apple inc"], &["*"], 0, 0.0)]),
+            (Op::Set, vec![rule(&["*"], &["*"], 0, 9.0)]),
+        ]);
+        assert_eq!(
+            costs(&cm, &sources, &sinks),
+            [None, None, Some(9.0), Some(9.0)]
+        );
+    }
+
+    #[test]
+    fn scale_and_add_change_existing_costs_only() {
+        let (sources, sinks, mut base) = apples();
+        base.remove(3); // bananas and more -> ohio fruits has no cost
+        let cm = layered(vec![
+            (Op::Set, base),
+            (Op::Scale, vec![rule(&["bananas and more"], &["*"], 0, 2.0)]),
+            (Op::Add, vec![rule(&["*"], &["ohio fruits"], 0, 0.5)]),
+        ]);
+        assert_eq!(
+            costs(&cm, &sources, &sinks),
+            [Some(2.0), Some(1.5), Some(2.0), None]
+        );
+    }
+
+    #[test]
+    fn one_rule_wins_per_layer() {
+        // overlapping rules in a Scale layer don't compound: the higher priority factor applies alone
+        let (sources, sinks, base) = apples();
+        let cm = layered(vec![
+            (Op::Set, base),
+            (
+                Op::Scale,
+                vec![
+                    rule(&["apple inc"], &["*"], 0, 10.0),
+                    rule(&["*"], &["ohio fruits"], 1, 3.0),
+                ],
+            ),
+        ]);
+        assert_eq!(
+            costs(&cm, &sources, &sinks),
+            [Some(20.0), Some(3.0), Some(1.0), Some(9.0)]
+        );
+    }
+
+    #[test]
+    fn empty_row_slots_match_any_rule_value() {
+        let sources =
+            Table::new(header(&["region", "site"]), vec![(key(&["*", "w1"]), 1)]).unwrap();
+        let cm = costmap(vec![rule(&["N", "w1"], &["*"], 0, 4.0)]);
+        assert_eq!(costs(&cm, &sources, &sinks()), [Some(4.0), Some(4.0)]);
+    }
+
+    /// Reference: evaluates every layer for every pair with `Key::matches`, no indexes.
+    fn naive(cm: &CostMap, sources: &Table, sinks: &Table) -> Vec<f64> {
+        let mut out = Vec::new();
+        for (s, _) in sources.rows() {
+            for (k, _) in sinks.rows() {
+                let (mut cost, mut blocked) = (f64::NAN, false);
+                for layer in cm.layers() {
+                    let winner = layer
+                        .rules
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| r.source.matches(s) && r.sink.matches(k))
+                        .max_by_key(|(i, r)| (r.priority, r.specificity(), std::cmp::Reverse(*i)));
+                    let Some((_, r)) = winner else { continue };
+                    if blocked {
+                        continue;
+                    }
+                    match layer.op {
+                        Op::Set => cost = r.value,
+                        Op::Scale => cost *= r.value,
+                        Op::Add => cost += r.value,
+                        Op::Block => (cost, blocked) = (f64::NAN, true),
+                    }
+                }
+                out.push(cost);
+            }
+        }
+        out
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, m: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % m
+        }
+
+        /// A key over 3 slots, each empty with probability `p_empty` percent.
+        fn key(&mut self, p_empty: u64) -> Key {
+            let slots: Vec<&str> = (0..3)
+                .map(|_| match self.below(100) < p_empty {
+                    true => "*",
+                    false => ["x", "y", "z"][self.below(3) as usize],
+                })
+                .collect();
+            key(&slots)
+        }
+
+        fn table(&mut self, n: usize) -> Table {
+            let mut seen = std::collections::HashSet::new();
+            let rows = (0..n)
+                .map(|_| self.key(15))
+                .filter(|k| seen.insert(k.clone()))
+                .map(|k| (k, 1))
+                .collect();
+            Table::new(header(&["a", "b", "c"]), rows).unwrap()
+        }
+
+        fn layer(&mut self, op: Op) -> Layer {
+            let rules = (0..12)
+                .map(|_| CostRule {
+                    source: self.key(60),
+                    sink: self.key(60),
+                    priority: self.below(3) as i8,
+                    value: 1.0 + self.below(5) as f64,
+                })
+                .collect();
+            Layer { op, rules }
+        }
+    }
+
+    #[test]
+    fn indexed_resolution_matches_the_reference() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..50 {
+            let (sources, sinks) = (rng.table(25), rng.table(20));
+            let ops = [Op::Set, Op::Scale, Op::Add, Op::Block, Op::Set];
+            let layers = ops.iter().map(|&op| rng.layer(op)).collect();
+            let h = header(&["a", "b", "c"]);
+            let cm = CostMap::new(h.clone(), h, layers).unwrap();
+            let (fast, slow) = (cm.resolve(&sources, &sinks), naive(&cm, &sources, &sinks));
+            assert!(
+                fast.iter()
+                    .zip(&slow)
+                    .all(|(a, b)| a == b || (a.is_nan() && b.is_nan()))
+            );
+        }
     }
 
     struct Fixed<T>(T);

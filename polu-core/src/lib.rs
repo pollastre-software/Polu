@@ -9,7 +9,9 @@ pub use crate::core::{BoxError, Polu, PoluError};
 // ports, implemented by adapters
 pub use crate::core::traits::{Load, Solver, Store};
 // inputs (what loaders build)
-pub use crate::core::types::{CostMap, CostRule, Header, Key, SinkList, SourceList, Table};
+pub use crate::core::types::{
+    CostMap, CostRule, Header, Key, Layer, Op, SinkList, SourceList, Table,
+};
 // solver contract (what solvers read and return, and stores read)
 pub use crate::core::types::{Assignment, Flow, Problem, Route};
 
