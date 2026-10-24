@@ -38,12 +38,22 @@ impl Key {
         self.0.iter().filter(|f| f.is_some()).count() as u8
     }
 
-    /// True if every set slot of `self` equals the same slot of `row`.
+    /// True if every set slot of `self` equals the same slot of `row`, where an empty slot in `row`
+    /// matches any value. This is how `Set` layers match, see [`CostRule::matches`].
     pub fn matches(&self, row: &Key) -> bool {
         self.0
             .iter()
             .zip(&row.0)
             .all(|(r, v)| r.is_none() || v.is_none() || r == v)
+    }
+
+    /// True if every set slot of `self` equals the same slot of `row`, which must be set too.
+    /// This is how `Scale`, `Add` and `Block` layers match, see [`CostRule::matches`].
+    pub fn matches_exactly(&self, row: &Key) -> bool {
+        self.0
+            .iter()
+            .zip(&row.0)
+            .all(|(r, v)| r.is_none() || r == v)
     }
 }
 

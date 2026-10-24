@@ -1267,7 +1267,7 @@ pub(crate) mod tests {
     #[test]
     fn csv_scenario_runs_end_to_end() {
         let mut app = solved("apples.polu.json");
-        assert_eq!(app.assignment().unwrap().objective, 37.0);
+        assert_eq!(app.assignment().unwrap().objective, 20.0);
 
         let out = std::env::temp_dir().join(format!("polu-tui-flows-{}.csv", std::process::id()));
         app.output = LineEdit::new(out.display().to_string());
@@ -1277,7 +1277,12 @@ pub(crate) mod tests {
         let written = std::fs::read_to_string(&out).unwrap();
         std::fs::remove_file(&out).ok();
         assert!(written.starts_with("source.business,source.size,sink.store,sink.state,units"));
-        assert_eq!(written.lines().count(), 5);
+        let units: i64 = written
+            .lines()
+            .skip(1)
+            .map(|l| l.rsplit(',').next().unwrap().parse::<i64>().unwrap())
+            .sum();
+        assert_eq!(units, 9);
     }
 
     #[cfg(feature = "json")]
@@ -1288,7 +1293,7 @@ pub(crate) mod tests {
                 .assignment()
                 .unwrap()
                 .objective,
-            37.0
+            20.0
         );
     }
 
@@ -1300,7 +1305,7 @@ pub(crate) mod tests {
                 .assignment()
                 .unwrap()
                 .objective,
-            37.0
+            20.0
         );
     }
 
@@ -1317,9 +1322,10 @@ pub(crate) mod tests {
         key(&mut app, KeyCode::Enter);
         assert_eq!(app.costs.rows.len(), 3);
         press(&mut app, "/");
+        // to Ohio, only [apple inc, small] (doubled to 2) and bananas and more (3) cost more than 1
         app.costs.filter = LineEdit::new("store=ohio cost>1");
         key(&mut app, KeyCode::Enter);
-        assert_eq!(app.costs.rows.len(), 3);
+        assert_eq!(app.costs.rows.len(), 2);
 
         press(&mut app, "o");
         let loaded = app.loaded.as_ref().unwrap();
@@ -1348,7 +1354,7 @@ pub(crate) mod tests {
         assert_eq!(loaded.trace(5).steps[0].cost, 1.0);
         press(&mut app, "4s");
         app.wait();
-        assert_eq!(app.assignment().unwrap().objective, 37.0);
+        assert_eq!(app.assignment().unwrap().objective, 20.0);
     }
 
     #[cfg(feature = "csv")]

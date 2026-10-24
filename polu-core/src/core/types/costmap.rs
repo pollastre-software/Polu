@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use super::{Header, Key, SLOTS, Sink, Source, Table};
 use crate::core::PoluError;
 
-/// What a layer does to the source/sink pairs its rules match.
+/// What a layer does to the source/sink pairs its rules match (see [`CostRule::matches`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
-    /// Sets the cost, opening the route if it had none.
+    /// Sets the cost, opening the route if it had none. An empty field in a source or sink row
+    /// matches any rule value, so a partial row is priced by the rules for the rows it covers.
     Set,
     /// Multiplies an existing cost by the rule's value. Pairs without a cost stay without one.
     Scale,
@@ -27,6 +28,19 @@ pub struct CostRule {
 }
 
 impl CostRule {
+    /// Whether this rule applies to a source/sink pair in a layer doing `op`. The rule's empty slots
+    /// match any value. `Set` matches loosely: an empty field in the row also matches any rule
+    /// value. `Scale`, `Add` and `Block` only apply to pairs that have every field the rule names,
+    /// so a `size=small` factor leaves a row with no size alone.
+    pub fn matches(&self, op: Op, source: &Key, sink: &Key) -> bool {
+        match op {
+            Op::Set => self.source.matches(source) && self.sink.matches(sink),
+            Op::Scale | Op::Add | Op::Block => {
+                self.source.matches_exactly(source) && self.sink.matches_exactly(sink)
+            }
+        }
+    }
+
     /// Number of fields this rule pins down, across both keys.
     pub fn specificity(&self) -> u8 {
         self.source.specificity() + self.sink.specificity()
@@ -153,7 +167,7 @@ impl CostMap {
                 .rules
                 .iter()
                 .enumerate()
-                .filter(|(_, r)| r.source.matches(s) && r.sink.matches(k))
+                .filter(|(_, r)| r.matches(layer.op, s, k))
                 .max_by_key(|(i, r)| (r.priority, r.specificity(), std::cmp::Reverse(*i)));
             if let Some((_, r)) = rule {
                 match layer.op {
@@ -183,9 +197,10 @@ impl CostMap {
     /// so work grows with those cells, not with `pairs × rules` or `pairs × layers`.
     pub fn resolve(&self, sources: &Table, sinks: &Table) -> Result<Vec<f64>, PoluError> {
         let (source_index, sink_index) = (RowIndex::new(sources), RowIndex::new(sinks));
-        // rules often repeat patterns (e.g. a base layer with one rule per pair), so masks are cached
-        let mut source_rows: HashMap<&Key, Vec<usize>> = HashMap::new();
-        let mut sink_rows: HashMap<&Key, Vec<usize>> = HashMap::new();
+        // rules often repeat patterns (e.g. a base layer with one rule per pair), so masks are cached,
+        // per pattern and per matching mode (`Set` matches loosely, see `CostRule::matches`)
+        let mut source_rows: HashMap<(&Key, bool), Vec<usize>> = HashMap::new();
+        let mut sink_rows: HashMap<(&Key, bool), Vec<usize>> = HashMap::new();
 
         let nk = sinks.rows().len();
         let cells = sources.rows().len() * nk;
@@ -205,6 +220,7 @@ impl CostMap {
         let mut touched = Vec::new();
 
         for layer in &self.layers {
+            let loose = layer.op == Op::Set;
             let mut order: Vec<(usize, &CostRule)> = layer.rules.iter().enumerate().collect();
             order.sort_by_cached_key(|(i, r)| (r.priority, r.specificity(), std::cmp::Reverse(*i)));
 
@@ -216,11 +232,11 @@ impl CostMap {
                     rule.value
                 };
                 let ss = source_rows
-                    .entry(&rule.source)
-                    .or_insert_with(|| source_index.rows_matching(&rule.source, true));
+                    .entry((&rule.source, loose))
+                    .or_insert_with(|| source_index.rows_matching(&rule.source, loose));
                 let ks = sink_rows
-                    .entry(&rule.sink)
-                    .or_insert_with(|| sink_index.rows_matching(&rule.sink, true));
+                    .entry((&rule.sink, loose))
+                    .or_insert_with(|| sink_index.rows_matching(&rule.sink, loose));
                 for &i in ss.iter() {
                     for &j in ks.iter() {
                         let c = i * nk + j;
@@ -286,7 +302,8 @@ impl<'a> RowIndex<'a> {
     }
 
     /// Rows agreeing with every set slot of `pattern`: the AND of those slots' bitsets.
-    /// With `loose`, a row's empty slot also agrees with any value (as in `Key::matches`).
+    /// With `loose`, a row's empty slot also agrees with any value (as in `Key::matches`);
+    /// without, the row must have the value (as in `Key::matches_exactly`).
     pub(super) fn rows_matching(&self, pattern: &Key, loose: bool) -> Vec<usize> {
         let mut mask: Option<Vec<u64>> = None; // None: every row
         for (slot, value) in self.slots.iter().zip(&pattern.0) {

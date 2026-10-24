@@ -401,10 +401,7 @@ mod tests {
         );
         polu.load_data().unwrap();
         let assignment = polu.run().unwrap();
-        assert_eq!(
-            assignment.objective,
-            3.0 * 8.0 + 3.0 * 1.0 + 2.0 * 2.0 + 1.0 * 6.0
-        );
+        assert_eq!(assignment.objective, 3.0 * 4.0 + 5.0 * 1.0 + 1.0 * 3.0);
         polu.store_data().unwrap();
 
         let mut written = calamine::open_workbook_auto(&path).unwrap();

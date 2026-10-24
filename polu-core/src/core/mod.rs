@@ -533,7 +533,31 @@ mod tests {
         assert_eq!(costs(&cm, &sources, &sinks()), [Some(4.0), Some(4.0)]);
     }
 
-    /// Reference: evaluates every layer for every pair with `Key::matches`, no indexes.
+    /// Set prices a partial row by the rules for the rows it covers; the layers after it only touch
+    /// pairs that have every field they name.
+    #[test]
+    fn only_set_lets_empty_row_fields_match() {
+        let sources = Table::new(
+            header(&["region", "site"]),
+            vec![(key(&["apple inc"]), 5), (key(&["apple inc", "small"]), 7)],
+        )
+        .unwrap();
+        let sinks = Table::new(header(&["region", "store"]), vec![(key(&["ohio"]), 1)]).unwrap();
+        let cm = layered(vec![
+            (Op::Set, vec![rule(&["apple inc", "small"], &["*"], 0, 2.0)]),
+            (Op::Scale, vec![rule(&["*", "small"], &["*"], 0, 3.0)]),
+            (Op::Add, vec![rule(&["*", "small"], &["ohio"], 0, 1.0)]),
+            (Op::Block, vec![rule(&["*", "small"], &["*", "OH"], 0, 0.0)]),
+        ]);
+        // [apple inc, *] gets the small row's cost, but no small factor, amount or block;
+        // the block names a store field the sink doesn't have, so it misses both rows
+        assert_eq!(costs(&cm, &sources, &sinks), [Some(2.0), Some(7.0)]);
+        let step = |r: usize| cm.trace(&sources, &sinks, r, 0);
+        assert_eq!(step(0).steps[1].rule, None);
+        assert_eq!(step(1).steps[1].rule, Some(0));
+    }
+
+    /// Reference: evaluates every layer for every pair with `CostRule::matches`, no indexes.
     fn naive(cm: &CostMap, sources: &Table, sinks: &Table) -> Vec<f64> {
         let mut out = Vec::new();
         for (i, (s, _)) in sources.rows().iter().enumerate() {
@@ -547,7 +571,7 @@ mod tests {
                         .rules
                         .iter()
                         .enumerate()
-                        .filter(|(_, r)| r.source.matches(s) && r.sink.matches(k))
+                        .filter(|(_, r)| r.matches(layer.op, s, k))
                         .max_by_key(|(i, r)| (r.priority, r.specificity(), std::cmp::Reverse(*i)));
                     let Some((_, r)) = winner else { continue };
                     if blocked {

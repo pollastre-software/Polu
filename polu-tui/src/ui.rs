@@ -792,7 +792,7 @@ mod tests {
 
         app.tab = Tab::Solve;
         let text = screen(&mut app);
-        assert!(text.contains("objective 37"), "{text}");
+        assert!(text.contains("objective 20"), "{text}");
         app.show_usage = true;
         let text = screen(&mut app);
         assert!(text.contains("5 / 5"), "{text}");
@@ -800,7 +800,7 @@ mod tests {
         app.tab = Tab::Data;
         assert!(screen(&mut app).contains("caps 2 rows"));
         app.tab = Tab::Save;
-        assert!(screen(&mut app).contains("4 flows ready to save"));
+        assert!(screen(&mut app).contains("flows ready to save"));
         app.popup = Some(Popup::Help);
         assert!(screen(&mut app).contains("Filters"));
     }

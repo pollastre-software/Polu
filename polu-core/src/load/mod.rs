@@ -3,8 +3,9 @@
 //! so the column rules live here and a format module only turns its input into cells.
 //!
 //! Sources and sinks: one quantity column plus up to 8 category columns, in header order.
-//! An empty category cell means the row doesn't specify it (it matches any value in the costmap,
-//! and a row that leaves fields empty covers, and caps, the more specific rows under it).
+//! An empty category cell means the row doesn't specify it: `Set` layer rules for any value of it
+//! still price the row, `Scale`, `Add` and `Block` rules naming it don't apply, and a row that
+//! leaves fields empty covers, and caps, the more specific rows under it.
 //!
 //! | business  | size  | capacity |
 //! |-----------|-------|----------|

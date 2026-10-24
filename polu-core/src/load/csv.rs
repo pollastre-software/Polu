@@ -322,14 +322,10 @@ bananas and more,ohio fruits,3
         );
         polu.load_data().unwrap();
         let assignment = polu.run().unwrap();
-        // rows with no size also match the `small` scale rule (empty fields match any rule value),
-        // so only [apple inc, large] keeps its base cost of 1; everything else is doubled.
-        // WA (3): apple inc is blocked, bananas at 8. Ohio (6): apple inc is capped at 5 in total,
-        // 3 large at 1 and 2 more at 2; the last unit from bananas at 6.
-        assert_eq!(
-            assignment.objective,
-            3.0 * 8.0 + 3.0 * 1.0 + 2.0 * 2.0 + 1.0 * 6.0
-        );
+        // the `small` scale rule only doubles [apple inc, small]: rows with no size keep their cost.
+        // WA (3): apple inc is blocked, bananas at 4. Ohio (6): apple inc is capped at 5 in total,
+        // all at 1 (small costs 2); the last unit from bananas at 3.
+        assert_eq!(assignment.objective, 3.0 * 4.0 + 5.0 * 1.0 + 1.0 * 3.0);
         polu.store_data().unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
