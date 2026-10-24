@@ -114,6 +114,7 @@ pub struct Polu {
     costmap_loader: Box<dyn Load<CostMap>>,
     solver: Box<dyn Solver>,
     storer: Box<dyn Store>,
+    tables: Option<(SourceList, SinkList)>,
     problem: Option<Problem>,
     solution: Option<Assignment>,
 }
@@ -132,6 +133,7 @@ impl Polu {
             costmap_loader,
             solver,
             storer,
+            tables: None,
             problem: None,
             solution: None,
         }
@@ -145,7 +147,10 @@ impl Polu {
         let costmap = self.costmap_loader.load().map_err(PoluError::Load)?;
 
         self.solution = None;
-        Ok(self.problem.insert(formulate(&sources, &sinks, &costmap)?))
+        let problem = formulate(&sources, &sinks, &costmap)?;
+        // kept so stores can label the flows
+        self.tables = Some((sources, sinks));
+        Ok(self.problem.insert(problem))
     }
 
     /// runs the assigner and stores the assignment data
@@ -164,7 +169,13 @@ impl Polu {
             .solution
             .as_ref()
             .ok_or(PoluError::NotReady("call run() before store_data()"))?;
-        self.storer.store(solution).map_err(PoluError::Store)
+        let (sources, sinks) = self
+            .tables
+            .as_ref()
+            .ok_or(PoluError::NotReady("call load_data() before store_data()"))?;
+        self.storer
+            .store(solution, sources, sinks)
+            .map_err(PoluError::Store)
     }
 }
 
@@ -720,7 +731,12 @@ mod tests {
     struct Capture(Rc<RefCell<Option<Assignment>>>);
 
     impl Store for Capture {
-        fn store(&self, assignment: &Assignment) -> Result<(), BoxError> {
+        fn store(
+            &self,
+            assignment: &Assignment,
+            _: &SourceList,
+            _: &SinkList,
+        ) -> Result<(), BoxError> {
             *self.0.borrow_mut() = Some(assignment.clone());
             Ok(())
         }

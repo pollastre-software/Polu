@@ -1,8 +1,10 @@
 mod core;
-mod load;
+/// Loaders, one module per format behind its cargo feature, e.g. `load::csv::CsvTable`.
+pub mod load;
 #[cfg(feature = "highs")]
 mod solver;
-mod store;
+/// Stores, one module per format behind its cargo feature, e.g. `store::csv::CsvStore`.
+pub mod store;
 
 // pipeline
 pub use crate::core::{BoxError, Polu, PoluError};
@@ -15,5 +17,6 @@ pub use crate::core::types::{
 // solver contract (what solvers read and return, and stores read)
 pub use crate::core::types::{Assignment, Flow, Limit, Problem, Route};
 
+// solver adapter, behind the `highs` cargo feature (on by default)
 #[cfg(feature = "highs")]
 pub use solver::HighsSolver;
