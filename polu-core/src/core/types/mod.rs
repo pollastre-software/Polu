@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use crate::core::PoluError;
 
-pub use costmap::{CostMap, CostRule, Layer, Op};
+pub use costmap::{CostMap, CostRule, Layer, Op, Trace, TraceStep};
 
 use costmap::RowIndex;
 pub use sink::{Sink, SinkList};

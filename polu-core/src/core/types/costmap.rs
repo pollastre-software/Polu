@@ -41,6 +41,37 @@ pub struct Layer {
     pub rules: Vec<CostRule>,
 }
 
+/// How one pair's cost was reached, from [`CostMap::trace`]: the base cost, then one step per layer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Trace {
+    /// The starting cost, `None` without a base matrix. `NaN` means the pair starts without a route.
+    pub base: Option<f64>,
+    /// One step per layer, in order, ending early at a block.
+    pub steps: Vec<TraceStep>,
+}
+
+impl Trace {
+    /// The final cost, as [`CostMap::resolve`] gives it. `NaN` means the pair can't be used.
+    pub fn cost(&self) -> f64 {
+        self.steps
+            .last()
+            .map(|s| s.cost)
+            .or(self.base)
+            .unwrap_or(f64::NAN)
+    }
+}
+
+/// What one layer did to a pair.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraceStep {
+    pub layer: usize,
+    pub op: Op,
+    /// Index of the rule that won in this layer, `None` when no rule matched (the cost is unchanged).
+    pub rule: Option<usize>,
+    /// The cost after this layer.
+    pub cost: f64,
+}
+
 /// An optional base cost per pair, then layers applied in order, e.g. `Scale` preferences, then a `Block` list.
 /// The rule keys use the same slot layout as the source and sink headers.
 #[derive(Debug, Clone)]
@@ -101,6 +132,48 @@ impl CostMap {
 
     pub fn layers(&self) -> &[Layer] {
         &self.layers
+    }
+
+    /// Explains one pair's cost layer by layer, with the same winner rules as [`CostMap::resolve`].
+    /// Scans every rule for this one pair, so it's for inspecting pairs, not for resolving them all.
+    ///
+    /// # Panics
+    /// If `source` or `sink` is not a row of its table.
+    pub fn trace(&self, sources: &Table, sinks: &Table, source: usize, sink: usize) -> Trace {
+        let (s, k) = (&sources.rows()[source].0, &sinks.rows()[sink].0);
+        let base = self.base.as_ref().map(|b| {
+            b.get(source * sinks.rows().len() + sink)
+                .copied()
+                .unwrap_or(f64::NAN)
+        });
+        let mut cost = base.unwrap_or(f64::NAN);
+        let mut steps = Vec::new();
+        for (l, layer) in self.layers.iter().enumerate() {
+            let rule = layer
+                .rules
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.source.matches(s) && r.sink.matches(k))
+                .max_by_key(|(i, r)| (r.priority, r.specificity(), std::cmp::Reverse(*i)));
+            if let Some((_, r)) = rule {
+                match layer.op {
+                    Op::Set => cost = r.value,
+                    Op::Scale => cost *= r.value,
+                    Op::Add => cost += r.value,
+                    Op::Block => cost = f64::NAN,
+                }
+            }
+            steps.push(TraceStep {
+                layer: l,
+                op: layer.op,
+                rule: rule.map(|(i, _)| i),
+                cost,
+            });
+            if layer.op == Op::Block && rule.is_some() {
+                break;
+            }
+        }
+        Trace { base, steps }
     }
 
     /// Cost of every source/sink pair, row-major (`sources × sinks`). `NaN` means the pair can't be used.

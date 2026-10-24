@@ -4,3 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+polu-core = { path = "../polu-core", default-features = false, features = ["highs"] }
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = ["csv"]
+csv = ["polu-core/csv"]
+xlsx = ["polu-core/xlsx"]
+json = ["polu-core/json"]

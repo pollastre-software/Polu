@@ -52,6 +52,13 @@ impl XlsxTable {
         Ok(self.columns(&range)?.header)
     }
 
+    /// Every column name, the quantity column included, e.g. to let a user pick the quantity column.
+    pub fn column_names(&self) -> Result<Vec<String>, BoxError> {
+        let range = sheet(&mut workbook(&self.workbook)?, &self.sheet)?;
+        let header = header_row(&range).map_err(|e| format!("sheet `{}`: {e}", self.sheet))?;
+        Ok(header.into_iter().map(Cow::into_owned).collect())
+    }
+
     fn columns(&self, range: &Range<Data>) -> Result<TableColumns, BoxError> {
         let header = header_row(range).map_err(|e| format!("sheet `{}`: {e}", self.sheet))?;
         TableColumns::new(&header, &self.quantity_column)
@@ -159,6 +166,11 @@ impl Load<CostMap> for XlsxCostMap {
         }
         Ok(costmap.with_base(costs)?)
     }
+}
+
+/// The sheet names of a workbook, in workbook order.
+pub fn sheet_names(workbook: &[u8]) -> Result<Vec<String>, BoxError> {
+    Ok(self::workbook(workbook)?.sheet_names())
 }
 
 type Workbook<'a> = Sheets<Cursor<&'a [u8]>>;
@@ -295,6 +307,11 @@ mod tests {
             .unwrap();
         assert_eq!(names(table.header()), ["business", "size"]);
         assert_eq!(table.rows().len(), 4);
+        let all = XlsxTable::new(apples(), "sinks", "")
+            .column_names()
+            .unwrap();
+        assert_eq!(all, ["store", "state", "demand"]);
+        assert_eq!(sheet_names(&apples()).unwrap()[..2], ["sources", "sinks"]);
         let (key, amount) = &table.rows()[0];
         assert_eq!(
             (key.get_slot(0), key.get_slot(1), *amount),

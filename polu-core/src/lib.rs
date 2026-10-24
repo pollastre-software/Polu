@@ -12,7 +12,7 @@ pub use crate::core::{BoxError, Polu, PoluError};
 pub use crate::core::traits::{Load, Solver, Store};
 // inputs (what loaders build)
 pub use crate::core::types::{
-    CostMap, CostRule, Header, Key, Layer, Op, SinkList, SourceList, Table,
+    CostMap, CostRule, Header, Key, Layer, Op, SinkList, SourceList, Table, Trace, TraceStep,
 };
 // solver contract (what solvers read and return, and stores read)
 pub use crate::core::types::{Assignment, Flow, Limit, Problem, Route};

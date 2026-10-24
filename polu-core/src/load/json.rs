@@ -44,12 +44,17 @@ impl JsonTable {
 
     /// The category columns, in slot order. Pass these to [`JsonCostMap::new`].
     pub fn header(&self) -> Result<Header, BoxError> {
+        Ok(TableColumns::new(&self.column_names()?, &self.quantity_column)?.header)
+    }
+
+    /// Every column name, the quantity column included, e.g. to let a user pick the quantity column.
+    pub fn column_names(&self) -> Result<Vec<String>, BoxError> {
         #[derive(Deserialize)]
         struct Headers {
             headers: Vec<String>,
         }
         let Headers { headers } = serde_json::from_str(&self.text)?;
-        Ok(TableColumns::new(&headers, &self.quantity_column)?.header)
+        Ok(headers)
     }
 }
 
@@ -220,6 +225,8 @@ mod tests {
         assert_eq!(table.rows()[3].0.get_slot(1), None);
         let header = JsonTable::new(SINKS, "demand").header().unwrap();
         assert_eq!(names(&header), ["store", "state"]);
+        let all = JsonTable::new(SINKS, "").column_names().unwrap();
+        assert_eq!(all, ["store", "state", "demand"]);
     }
 
     #[test]

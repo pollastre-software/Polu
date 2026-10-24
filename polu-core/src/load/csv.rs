@@ -50,9 +50,14 @@ impl CsvTable {
         Ok(self.columns()?.header)
     }
 
-    fn columns(&self) -> Result<TableColumns, BoxError> {
+    /// Every column name, the quantity column included, e.g. to let a user pick the quantity column.
+    pub fn column_names(&self) -> Result<Vec<String>, BoxError> {
         let columns = reader(&self.text, self.delimiter, true).headers()?.clone();
-        TableColumns::new(&columns.iter().collect::<Vec<_>>(), &self.quantity_column)
+        Ok(columns.iter().map(Into::into).collect())
+    }
+
+    fn columns(&self) -> Result<TableColumns, BoxError> {
+        TableColumns::new(&self.column_names()?, &self.quantity_column)
     }
 }
 
@@ -198,6 +203,8 @@ ohio fruits,OH,6
     fn table_reads_categories_and_quantities() {
         let table = CsvTable::new(SOURCES, "capacity").load().unwrap();
         assert_eq!(names(table.header()), ["business", "size"]);
+        let all = CsvTable::new(SOURCES, "").column_names().unwrap();
+        assert_eq!(all, ["business", "size", "capacity"]);
         let (key, amount) = &table.rows()[0];
         assert_eq!(
             (key.get_slot(0), key.get_slot(1), *amount),

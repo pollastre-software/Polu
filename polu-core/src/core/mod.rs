@@ -114,7 +114,7 @@ pub struct Polu {
     costmap_loader: Box<dyn Load<CostMap>>,
     solver: Box<dyn Solver>,
     storer: Box<dyn Store>,
-    tables: Option<(SourceList, SinkList)>,
+    inputs: Option<(SourceList, SinkList, CostMap)>,
     problem: Option<Problem>,
     solution: Option<Assignment>,
 }
@@ -133,7 +133,7 @@ impl Polu {
             costmap_loader,
             solver,
             storer,
-            tables: None,
+            inputs: None,
             problem: None,
             solution: None,
         }
@@ -148,8 +148,8 @@ impl Polu {
 
         self.solution = None;
         let problem = formulate(&sources, &sinks, &costmap)?;
-        // kept so stores can label the flows
-        self.tables = Some((sources, sinks));
+        // kept so stores can label the flows and views can inspect them
+        self.inputs = Some((sources, sinks, costmap));
         Ok(self.problem.insert(problem))
     }
 
@@ -170,12 +170,31 @@ impl Polu {
             .as_ref()
             .ok_or(PoluError::NotReady("call run() before store_data()"))?;
         let (sources, sinks) = self
-            .tables
-            .as_ref()
+            .tables()
             .ok_or(PoluError::NotReady("call load_data() before store_data()"))?;
         self.storer
             .store(solution, sources, sinks)
             .map_err(PoluError::Store)
+    }
+
+    /// The sources and sinks from the last `load_data()`.
+    pub fn tables(&self) -> Option<(&SourceList, &SinkList)> {
+        self.inputs
+            .as_ref()
+            .map(|(sources, sinks, _)| (sources, sinks))
+    }
+
+    /// The costmap from the last `load_data()`, e.g. to [`CostMap::trace`] a pair.
+    pub fn costmap(&self) -> Option<&CostMap> {
+        self.inputs.as_ref().map(|(_, _, costmap)| costmap)
+    }
+
+    pub fn problem(&self) -> Option<&Problem> {
+        self.problem.as_ref()
+    }
+
+    pub fn solution(&self) -> Option<&Assignment> {
+        self.solution.as_ref()
     }
 }
 
@@ -434,6 +453,44 @@ mod tests {
     }
 
     #[test]
+    fn trace_names_the_winning_rule_of_each_layer() {
+        use types::TraceStep;
+
+        let (sources, sinks, base) = apples();
+        let cm = layered(vec![
+            (Op::Set, base),
+            (Op::Scale, vec![rule(&["*"], &["ohio fruits"], 0, 2.0)]),
+            (
+                Op::Block,
+                vec![rule(&["apple inc"], &["stores and us"], 0, 0.0)],
+            ),
+            (Op::Set, vec![rule(&["*"], &["*"], 0, 9.0)]),
+        ]);
+        let step = |layer, op, rule, cost| TraceStep {
+            layer,
+            op,
+            rule,
+            cost,
+        };
+        // apple inc -> ohio fruits: base rule 1 (cost 1), doubled, no block, then reset to 9
+        let trace = cm.trace(&sources, &sinks, 0, 1);
+        assert_eq!(trace.base, None);
+        assert_eq!(
+            trace.steps,
+            [
+                step(0, Op::Set, Some(1), 1.0),
+                step(1, Op::Scale, Some(0), 2.0),
+                step(2, Op::Block, None, 2.0),
+                step(3, Op::Set, Some(0), 9.0),
+            ]
+        );
+        // apple inc -> stores and us: the block ends the trace
+        let trace = cm.trace(&sources, &sinks, 0, 0);
+        assert_eq!(trace.steps.len(), 3);
+        assert!(trace.cost().is_nan());
+    }
+
+    #[test]
     fn scale_and_add_change_existing_costs_only() {
         let (sources, sinks, mut base) = apples();
         base.remove(3); // bananas and more -> ohio fruits has no cost
@@ -688,11 +745,17 @@ mod tests {
             }
             let fast = cm.resolve(&sources, &sinks).unwrap();
             let slow = naive(&cm, &sources, &sinks);
-            assert!(
-                fast.iter()
-                    .zip(&slow)
+            let traced: Vec<f64> = (0..sources.rows().len())
+                .flat_map(|i| (0..sinks.rows().len()).map(move |j| (i, j)))
+                .map(|(i, j)| cm.trace(&sources, &sinks, i, j).cost())
+                .collect();
+            let same = |a: &[f64], b: &[f64]| {
+                a.iter()
+                    .zip(b)
                     .all(|(a, b)| a == b || (a.is_nan() && b.is_nan()))
-            );
+            };
+            assert!(same(&fast, &slow));
+            assert!(same(&fast, &traced));
         }
     }
 
@@ -759,11 +822,16 @@ mod tests {
 
         assert!(matches!(polu.run(), Err(PoluError::NotReady(_))));
         assert!(matches!(polu.store_data(), Err(PoluError::NotReady(_))));
+        assert!(polu.tables().is_none() && polu.problem().is_none());
 
         polu.load_data().unwrap();
         assert_eq!(polu.run().unwrap().objective, 4.0 * 1.0 + 6.0 * 2.0);
         polu.store_data().unwrap();
         assert_eq!(stored.borrow().as_ref().unwrap().flows.len(), 2);
+        // what was loaded and solved stays inspectable
+        assert_eq!(polu.tables().unwrap().0.rows().len(), 2);
+        assert_eq!(polu.costmap().unwrap().layers().len(), 1);
+        assert_eq!(polu.solution(), stored.borrow().as_ref());
     }
 
     #[test]
