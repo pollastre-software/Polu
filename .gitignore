@@ -1,2 +1,7 @@
 vault/*
 target/*
+*.patch
+*.csv
+*.DS_Store
+*.json
+*.xlsx

@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use ::csv::WriterBuilder;
 
-use super::{columns, flows};
+use super::{Rows, flow_table, slack_table};
 use crate::core::BoxError;
 use crate::core::traits::Store;
-use crate::core::types::{Assignment, SinkList, SourceList};
+use crate::core::types::{Assignment, SinkList, Slack, SourceList};
 
 /// Writes the assignment to a CSV file, one line per flow.
 #[derive(Debug, Clone)]
@@ -38,13 +38,36 @@ impl CsvStore {
         sources: &SourceList,
         sinks: &SinkList,
     ) -> Result<(), BoxError> {
+        self.write_table(writer, flow_table(assignment, sources, sinks))
+    }
+
+    /// Writes the unused source capacity as CSV to any writer.
+    pub fn write_slack(
+        &self,
+        writer: impl Write,
+        slack: &[Slack],
+        sources: &SourceList,
+    ) -> Result<(), BoxError> {
+        self.write_table(writer, slack_table(slack, sources))
+    }
+
+    fn write_table(
+        &self,
+        writer: impl Write,
+        (columns, rows): (Vec<String>, Rows),
+    ) -> Result<(), BoxError> {
         let mut out = WriterBuilder::new()
             .delimiter(self.delimiter)
             .from_writer(writer);
-        out.write_record(columns(sources, sinks))?;
-        for (cells, units) in flows(assignment, sources, sinks) {
-            let units = units.to_string();
-            out.write_record(cells.iter().map(|c| c.unwrap_or_default()).chain([&*units]))?;
+        out.write_record(columns)?;
+        for (cells, numbers) in rows {
+            let numbers: Vec<String> = numbers.iter().map(i64::to_string).collect();
+            out.write_record(
+                cells
+                    .iter()
+                    .map(|c| c.unwrap_or_default())
+                    .chain(numbers.iter().map(String::as_str)),
+            )?;
         }
         out.flush()?;
         Ok(())
@@ -64,5 +87,9 @@ impl Store for CsvStore {
             sources,
             sinks,
         )
+    }
+
+    fn store_slack(&self, slack: &[Slack], sources: &SourceList) -> Result<(), BoxError> {
+        self.write_slack(std::fs::File::create(&self.path)?, slack, sources)
     }
 }

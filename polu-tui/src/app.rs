@@ -254,7 +254,10 @@ pub struct App {
     pub solve: SolveState,
     pub flows: ListView,
     pub show_usage: bool,
+    /// The flows path, then the unused capacity (slack) path; `save_row` picks one.
     pub output: LineEdit,
+    pub slack_output: LineEdit,
+    pub save_row: usize,
     pub editing_output: bool,
     /// The path the user was warned would be overwritten.
     pub overwrite: Option<PathBuf>,
@@ -269,6 +272,7 @@ const MAX_FILES: usize = 20_000;
 impl App {
     pub fn new(root: PathBuf) -> Self {
         let output = LineEdit::new(root.join("flows.csv").display().to_string());
+        let slack_output = LineEdit::new(root.join("slack.csv").display().to_string());
         Self {
             tab: Tab::Inputs,
             root,
@@ -289,6 +293,8 @@ impl App {
             flows: ListView::default(),
             show_usage: false,
             output,
+            slack_output,
+            save_row: 0,
             editing_output: false,
             overwrite: None,
             quit: false,
@@ -567,9 +573,17 @@ impl App {
         }
     }
 
-    /// Writes the assignment with the store the output path's extension picks.
+    /// The Save tab's selected path: flows or unused capacity.
+    pub fn save_path(&mut self) -> &mut LineEdit {
+        match self.save_row {
+            0 => &mut self.output,
+            _ => &mut self.slack_output,
+        }
+    }
+
+    /// Writes the flows, or the unused source capacity, with the store the path's extension picks.
     pub fn save_output(&mut self) {
-        let path = PathBuf::from(self.output.text.trim());
+        let path = PathBuf::from(self.save_path().text.trim());
         if self.assignment().is_none() {
             return self.error("solve first (Solve tab)");
         }
@@ -585,10 +599,19 @@ impl App {
             return;
         };
         let (sources, sinks) = loaded.tables();
-        let flows = assignment.flows.len();
-        let result = io::store(&path).and_then(|store| store.store(assignment, sources, sinks));
+        let (result, saved) = if self.save_row == 0 {
+            let result = io::store(&path).and_then(|store| store.store(assignment, sources, sinks));
+            (result, format!("{} flows", assignment.flows.len()))
+        } else {
+            let slack = loaded.problem().slack(assignment);
+            let result = io::store(&path).and_then(|store| store.store_slack(&slack, sources));
+            (
+                result,
+                format!("unused capacity of {} sources", slack.len()),
+            )
+        };
         match result {
-            Ok(()) => self.info(format!("saved {flows} flows to {}", path.display())),
+            Ok(()) => self.info(format!("saved {saved} to {}", path.display())),
             Err(e) => self.error(format!("save failed: {e}")),
         }
     }
@@ -694,11 +717,12 @@ impl App {
                     }
                 }
             }
-            Tab::Save => {
-                if matches!(key.code, KeyCode::Enter | KeyCode::Char('e')) {
-                    self.editing_output = true;
-                }
-            }
+            Tab::Save => match key.code {
+                KeyCode::Enter | KeyCode::Char('e') => self.editing_output = true,
+                KeyCode::Up | KeyCode::Char('k') => self.save_row = 0,
+                KeyCode::Down | KeyCode::Char('j') => self.save_row = 1,
+                _ => {}
+            },
         }
     }
 
@@ -712,7 +736,7 @@ impl App {
                 self.editing_output = false;
             } else {
                 self.overwrite = None;
-                self.output.handle(key);
+                self.save_path().handle(key);
             }
             return;
         }
@@ -1283,6 +1307,26 @@ pub(crate) mod tests {
             .map(|l| l.rsplit(',').next().unwrap().parse::<i64>().unwrap())
             .sum();
         assert_eq!(units, 9);
+
+        // the second path writes the unused source capacity
+        let out = std::env::temp_dir().join(format!("polu-tui-slack-{}.csv", std::process::id()));
+        app.slack_output = LineEdit::new(out.display().to_string());
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Enter);
+        let written = std::fs::read_to_string(&out).unwrap();
+        std::fs::remove_file(&out).ok();
+        assert!(!app.message.as_ref().unwrap().0, "{:?}", app.message);
+        assert!(
+            written.starts_with(
+                "source.business,source.size,used,capacity,unused,spare\napple inc,,5,5,0,0\n"
+            ),
+            "{written}"
+        );
+        assert!(
+            written.ends_with("bananas and more,,4,20,16,16\n"),
+            "{written}"
+        );
     }
 
     #[cfg(feature = "json")]

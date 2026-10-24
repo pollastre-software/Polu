@@ -1,6 +1,9 @@
 //! Stores, one module per output format, each behind the cargo feature of the same name
 //! (`csv` is on by default; `xlsx` and `json` are opt-in). Every format writes the same table: one row per flow with the
 //! source's category columns (`source.<column>`), the sink's (`sink.<column>`), then `units`.
+//!
+//! `store_slack` writes the unused source capacity the same way: one row per source row with its
+//! `source.<column>`s, then `used`, `capacity`, `unused` and `spare` (see [`crate::Slack`]).
 
 #![cfg_attr(
     not(any(feature = "csv", feature = "xlsx", feature = "json")),
@@ -14,7 +17,43 @@ pub mod json;
 #[cfg(feature = "xlsx")]
 pub mod xlsx;
 
-use crate::core::types::{Assignment, Header, SinkList, SourceList};
+use crate::core::types::{Assignment, Header, SinkList, Slack, SourceList};
+
+/// A table to write: column names, then rows of category cells (`None` where a row leaves a field
+/// empty) followed by numbers, so every format writes flows and slack alike.
+type Rows<'a> = Box<dyn Iterator<Item = (Vec<Option<&'a str>>, Vec<i64>)> + 'a>;
+
+/// The flow table: [`columns`] and [`flows`].
+fn flow_table<'a>(
+    assignment: &'a Assignment,
+    sources: &'a SourceList,
+    sinks: &'a SinkList,
+) -> (Vec<String>, Rows<'a>) {
+    (
+        columns(sources, sinks),
+        Box::new(flows(assignment, sources, sinks).map(|(cells, units)| (cells, vec![units]))),
+    )
+}
+
+/// The slack table: `source.<column>`..., `used`, `capacity`, `unused`, `spare`, one row per source row.
+fn slack_table<'a>(slack: &'a [Slack], sources: &'a SourceList) -> (Vec<String>, Rows<'a>) {
+    let slots = named(sources.header());
+    let mut columns: Vec<String> = slots
+        .iter()
+        .map(|&s| {
+            format!(
+                "source.{}",
+                sources.header()[s].as_deref().unwrap_or_default()
+            )
+        })
+        .collect();
+    columns.extend(["used", "capacity", "unused", "spare"].map(String::from));
+    let rows = slack.iter().zip(sources.rows()).map(move |(s, (key, _))| {
+        let cells = slots.iter().map(|&slot| key.get_slot(slot)).collect();
+        (cells, vec![s.used, s.amount, s.unused(), s.spare])
+    });
+    (columns, Box::new(rows))
+}
 
 /// The column names: `source.<column>`..., `sink.<column>`..., `units`.
 fn columns(sources: &SourceList, sinks: &SinkList) -> Vec<String> {

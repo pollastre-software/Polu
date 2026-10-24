@@ -130,6 +130,58 @@ pub struct Problem {
     pub demand: Vec<Limit>,
 }
 
+impl Problem {
+    /// Unused capacity of each supply limit under `assignment`; `slack[i]` belongs to source row i.
+    /// Computed from the flows rather than read from the solver, so every solver reports it the same way.
+    pub fn slack(&self, assignment: &Assignment) -> Vec<Slack> {
+        let mut shipped = vec![0i64; self.supply.len()];
+        for flow in &assignment.flows {
+            shipped[flow.source] += flow.units;
+        }
+        let used: Vec<i64> = self
+            .supply
+            .iter()
+            .map(|limit| limit.rows.iter().map(|&r| shipped[r]).sum())
+            .collect();
+        // a row can ship more only while every limit over it has room
+        let mut spare: Vec<i64> = vec![i64::MAX; self.supply.len()];
+        for (limit, used) in self.supply.iter().zip(&used) {
+            for &r in &limit.rows {
+                spare[r] = spare[r].min(limit.amount - used);
+            }
+        }
+        self.supply
+            .iter()
+            .zip(used)
+            .zip(spare)
+            .map(|((limit, used), spare)| Slack {
+                used,
+                amount: limit.amount,
+                spare,
+            })
+            .collect()
+    }
+}
+
+/// How much of one supply limit a solution leaves unused.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Slack {
+    /// Units shipped from the limit's rows (the row and every row it covers).
+    pub used: i64,
+    /// The limit's amount.
+    pub amount: i64,
+    /// Units the row itself could still ship before some limit over it is full: the smallest
+    /// [`unused`](Slack::unused) of every limit that includes the row.
+    pub spare: i64,
+}
+
+impl Slack {
+    /// `amount - used`: the limit's slack, as the solver's row slack would report it.
+    pub fn unused(&self) -> i64 {
+        self.amount - self.used
+    }
+}
+
 /// Units sent along one route.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Flow {

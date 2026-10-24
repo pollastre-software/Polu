@@ -340,5 +340,19 @@ bananas and more,ohio fruits,3
             .sum();
         assert_eq!(units, 9);
         assert!(written.contains("bananas and more,,stores and us,WA,3"));
+
+        // slack: the apple inc cap is used up, bananas and more ships 4 of 20
+        let mut slack = Vec::new();
+        CsvStore::new(&path)
+            .write_slack(&mut slack, &polu.slack().unwrap(), polu.tables().unwrap().0)
+            .unwrap();
+        let slack = String::from_utf8(slack).unwrap();
+        let mut lines = slack.lines();
+        assert_eq!(
+            lines.next(),
+            Some("source.business,source.size,used,capacity,unused,spare")
+        );
+        assert_eq!(lines.next(), Some("apple inc,,5,5,0,0"));
+        assert!(slack.ends_with("bananas and more,,4,20,16,16\n"), "{slack}");
     }
 }

@@ -4,7 +4,7 @@ pub(crate) mod types;
 use std::{error::Error, fmt};
 
 use traits::{Load, Solver, Store};
-use types::{Assignment, CostMap, Limit, Problem, Route, SinkList, SourceList, Table};
+use types::{Assignment, CostMap, Limit, Problem, Route, SinkList, Slack, SourceList, Table};
 
 /// Error type returned by every adapter (loaders, solvers, stores).
 pub type BoxError = Box<dyn Error + Send + Sync>;
@@ -195,6 +195,11 @@ impl Polu {
 
     pub fn solution(&self) -> Option<&Assignment> {
         self.solution.as_ref()
+    }
+
+    /// Unused source capacity of the last solution, see [`Problem::slack`].
+    pub fn slack(&self) -> Option<Vec<Slack>> {
+        Some(self.problem.as_ref()?.slack(self.solution.as_ref()?))
     }
 }
 
@@ -696,6 +701,18 @@ mod tests {
         assert_eq!(shipped(&[0, 1, 2]), 5);
         assert_eq!(shipped(&[3]), 4);
 
+        // the business cap is full, so neither size row can ship more even where its own cap has room
+        let slack = problem.slack(&a);
+        assert_eq!(
+            (slack[0].used, slack[0].unused(), slack[0].spare),
+            (5, 0, 0)
+        );
+        assert!(slack[1..3].iter().all(|s| s.spare == 0));
+        assert_eq!(
+            (slack[3].used, slack[3].unused(), slack[3].spare),
+            (4, 16, 16)
+        );
+
         // without bananas and more, 9 can't be met: 3 + 7 looks available, but the cap is 5
         let apples_only =
             Table::new(header(&["region", "site"]), sources.rows()[..3].to_vec()).unwrap();
@@ -856,6 +873,9 @@ mod tests {
         assert_eq!(polu.tables().unwrap().0.rows().len(), 2);
         assert_eq!(polu.costmap().unwrap().layers().len(), 1);
         assert_eq!(polu.solution(), stored.borrow().as_ref());
+        // N ships 4 of 10, S ships 6 of 5 (FirstRoute ignores supply)
+        let unused: Vec<i64> = polu.slack().unwrap().iter().map(Slack::unused).collect();
+        assert_eq!(unused, [6, -1]);
     }
 
     #[test]

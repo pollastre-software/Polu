@@ -5,10 +5,10 @@
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
-use super::{columns, flows};
+use super::{Rows, flow_table, slack_table};
 use crate::core::BoxError;
 use crate::core::traits::Store;
-use crate::core::types::{Assignment, SinkList, SourceList};
+use crate::core::types::{Assignment, SinkList, Slack, SourceList};
 
 /// Writes the assignment to a JSON file, one line per flow.
 #[derive(Debug, Clone)]
@@ -24,24 +24,41 @@ impl JsonStore {
     /// Writes the assignment as JSON to any writer, e.g. a `Vec<u8>` in tests or WASM.
     pub fn write(
         &self,
-        mut writer: impl Write,
+        writer: impl Write,
         assignment: &Assignment,
         sources: &SourceList,
         sinks: &SinkList,
     ) -> Result<(), BoxError> {
-        write!(writer, "{{\"headers\":")?;
-        serde_json::to_writer(&mut writer, &columns(sources, sinks))?;
-        write!(writer, ",\n\"data\":[")?;
-        for (r, (cells, units)) in flows(assignment, sources, sinks).enumerate() {
-            writer.write_all(if r == 0 { b"\n" } else { b",\n" })?;
-            let mut row: Vec<serde_json::Value> = cells.into_iter().map(Into::into).collect();
-            row.push(units.into());
-            serde_json::to_writer(&mut writer, &row)?;
-        }
-        writeln!(writer, "]}}")?;
-        writer.flush()?;
-        Ok(())
+        write_table(writer, flow_table(assignment, sources, sinks))
     }
+
+    /// Writes the unused source capacity as JSON to any writer.
+    pub fn write_slack(
+        &self,
+        writer: impl Write,
+        slack: &[Slack],
+        sources: &SourceList,
+    ) -> Result<(), BoxError> {
+        write_table(writer, slack_table(slack, sources))
+    }
+}
+
+fn write_table(
+    mut writer: impl Write,
+    (columns, rows): (Vec<String>, Rows),
+) -> Result<(), BoxError> {
+    write!(writer, "{{\"headers\":")?;
+    serde_json::to_writer(&mut writer, &columns)?;
+    write!(writer, ",\n\"data\":[")?;
+    for (r, (cells, numbers)) in rows.enumerate() {
+        writer.write_all(if r == 0 { b"\n" } else { b",\n" })?;
+        let mut row: Vec<serde_json::Value> = cells.into_iter().map(Into::into).collect();
+        row.extend(numbers.into_iter().map(serde_json::Value::from));
+        serde_json::to_writer(&mut writer, &row)?;
+    }
+    writeln!(writer, "]}}")?;
+    writer.flush()?;
+    Ok(())
 }
 
 impl Store for JsonStore {
@@ -56,6 +73,14 @@ impl Store for JsonStore {
             assignment,
             sources,
             sinks,
+        )
+    }
+
+    fn store_slack(&self, slack: &[Slack], sources: &SourceList) -> Result<(), BoxError> {
+        self.write_slack(
+            BufWriter::new(std::fs::File::create(&self.path)?),
+            slack,
+            sources,
         )
     }
 }

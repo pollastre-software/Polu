@@ -79,7 +79,9 @@ fn hint(app: &App) -> &'static str {
             "q quit · ? help · ↑↓ scroll · / filter · o sort · h no-route pairs · t trace"
         }
         Tab::Solve => "q quit · ? help · s solve · / filter · u use vs capacity · ↑↓ scroll",
-        Tab::Save => "q quit · ? help · Enter edit path, Enter again to save",
+        Tab::Save => {
+            "q quit · ? help · ↑↓ flows/unused capacity · Enter edit path, Enter again to save"
+        }
     }
 }
 
@@ -397,17 +399,20 @@ fn solve(frame: &mut Frame, area: Rect, app: &mut App) {
             out[f.source] += f.units;
             into[f.sink] += f.units;
         }
+        // unused capacity (the limit's slack) and spare (what the row could still ship under every cap over it)
+        let slack = problem.slack(a);
         let [left, right] =
-            Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(rest);
-        for (area, title, limits, table, slots, sent, verb) in [
+            Layout::horizontal([Constraint::Fill(3), Constraint::Fill(2)]).areas(rest);
+        for (area, title, limits, table, slots, sent, verb, slack) in [
             (
                 left,
-                " Sources: shipped / capacity ",
+                " Sources: shipped / capacity, unused, spare ",
                 &problem.supply,
                 sources,
                 &ss,
                 &out,
                 "shipped",
+                Some(&slack),
             ),
             (
                 right,
@@ -417,23 +422,35 @@ fn solve(frame: &mut Frame, area: Rect, app: &mut App) {
                 &ks,
                 &into,
                 "received",
+                None,
             ),
         ] {
-            let rows = limits.iter().zip(table.rows()).map(|(limit, (key, _))| {
-                let used: i64 = limit.rows.iter().map(|&r| sent[r]).sum();
-                let mut cells = fields(key, slots);
-                cells.push(format!("{used} / {}", limit.amount));
-                let row = Row::new(cells);
-                if used == limit.amount {
-                    row.bold()
-                } else {
-                    row
-                }
-            });
+            let rows = limits
+                .iter()
+                .zip(table.rows())
+                .enumerate()
+                .map(|(i, (limit, (key, _)))| {
+                    let used: i64 = limit.rows.iter().map(|&r| sent[r]).sum();
+                    let mut cells = fields(key, slots);
+                    cells.push(format!("{used} / {}", limit.amount));
+                    if let Some(slack) = slack {
+                        cells.extend([slack[i].unused().to_string(), slack[i].spare.to_string()]);
+                    }
+                    let row = Row::new(cells);
+                    if used == limit.amount {
+                        row.bold()
+                    } else {
+                        row
+                    }
+                });
             let mut names: Vec<String> = slots.iter().map(|&s| name(table.header(), s)).collect();
             names.push(verb.into());
             let mut widths = vec![Constraint::Fill(1); slots.len()];
             widths.push(Constraint::Length(14));
+            if slack.is_some() {
+                names.extend(["unused".into(), "spare".into()]);
+                widths.extend([Constraint::Length(8), Constraint::Length(8)]);
+            }
             frame.render_widget(
                 Table::new(rows, widths)
                     .header(Row::new(names).dark_gray())
@@ -486,20 +503,43 @@ fn save(frame: &mut Frame, area: Rect, app: &mut App) {
         Some(a) => format!("{} flows ready to save", a.flows.len()).green(),
         None => "nothing to save yet: solve on the Solve tab".yellow(),
     };
-    let block = Block::bordered().title(" Output file ");
+    let block = Block::bordered().title(" Output files ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [path, notes] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
-    edit_line(frame, path, "Path: ", &app.output, app.editing_output);
+    let [flows, slack, notes] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Min(1),
+    ])
+    .areas(inner);
+    for (row, area, label, edit) in [
+        (0, flows, "Flows:  ", &app.output),
+        (1, slack, "Unused: ", &app.slack_output),
+    ] {
+        let selected = app.save_row == row;
+        let [marker, line] =
+            Layout::horizontal([Constraint::Length(2), Constraint::Min(1)]).areas(area);
+        frame.render_widget(
+            Paragraph::new(if selected { "›" } else { " " }).bold(),
+            marker,
+        );
+        edit_line(frame, line, label, edit, selected && app.editing_output);
+    }
     frame.render_widget(
         Paragraph::new(vec![
             ready.into(),
+            Line::from(
+                "Unused writes each source row's used, capacity, unused (capacity - used) and spare \
+                 (what it could still ship under every cap over it).",
+            )
+            .dark_gray(),
             Line::from(format!(
                 "The format comes from the extension: {}",
                 formats.join(", ")
             ))
             .dark_gray(),
-        ]),
+        ])
+        .wrap(Wrap { trim: true }),
         notes,
     );
 }
@@ -630,8 +670,11 @@ Costs       o cycles the sort, h shows pairs with no route, t toggles the trace 
 
 Solve       s runs HiGHS in the background. u switches between the flows and each
             row's use against its capacity or demand (partial rows count every row they cap).
+            Sources also show unused capacity (capacity - used) and spare: what the row could
+            still ship before it or any partial row over it is full.
 
-Save        Enter edits the path, Enter again writes it. The extension picks the format.";
+Save        ↑/↓ pick the flows or the unused capacity path. Enter edits it, Enter again
+            writes it. The extension picks the format.";
 
 // ----- helpers -----
 
@@ -796,11 +839,15 @@ mod tests {
         app.show_usage = true;
         let text = screen(&mut app);
         assert!(text.contains("5 / 5"), "{text}");
+        assert!(text.contains("unused") && text.contains("spare"), "{text}");
+        assert!(text.contains("4 / 20"), "{text}");
 
         app.tab = Tab::Data;
         assert!(screen(&mut app).contains("caps 2 rows"));
         app.tab = Tab::Save;
-        assert!(screen(&mut app).contains("flows ready to save"));
+        let text = screen(&mut app);
+        assert!(text.contains("flows ready to save"), "{text}");
+        assert!(text.contains("slack.csv"), "{text}");
         app.popup = Some(Popup::Help);
         assert!(screen(&mut app).contains("Filters"));
     }

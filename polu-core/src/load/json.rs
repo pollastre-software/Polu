@@ -336,5 +336,18 @@ mod tests {
         );
         assert_eq!(flows.rows().iter().map(|(_, units)| units).sum::<i64>(), 9);
         assert!(written.contains(r#"["bananas and more",null,"stores and us","WA",3]"#));
+
+        let mut slack = Vec::new();
+        JsonStore::new(&path)
+            .write_slack(&mut slack, &polu.slack().unwrap(), polu.tables().unwrap().0)
+            .unwrap();
+        let slack = String::from_utf8(slack).unwrap();
+        assert!(slack.starts_with(
+            r#"{"headers":["source.business","source.size","used","capacity","unused","spare"]"#
+        ));
+        assert!(
+            slack.contains(r#"["bananas and more",null,4,20,16,16]"#),
+            "{slack}"
+        );
     }
 }

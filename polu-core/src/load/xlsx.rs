@@ -383,7 +383,7 @@ mod tests {
         use calamine::DataType;
 
         use crate::store::xlsx::XlsxStore;
-        use crate::{HighsSolver, Polu};
+        use crate::{HighsSolver, Polu, Store};
 
         let book: Arc<[u8]> = apples().into();
         let path = std::env::temp_dir().join(format!("polu-xlsx-test-{}.xlsx", std::process::id()));
@@ -426,5 +426,21 @@ mod tests {
         );
         let units: f64 = flows.rows().skip(1).map(|r| r[4].as_f64().unwrap()).sum();
         assert_eq!(units, 9.0);
+
+        // slack goes to its own file, on a `slack` sheet: bananas and more ships 4 of 20
+        let store = XlsxStore::new(&path);
+        let (sources, _) = polu.tables().unwrap();
+        store.store_slack(&polu.slack().unwrap(), sources).unwrap();
+        let mut written = calamine::open_workbook_auto(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        let slack = written.worksheet_range("slack").unwrap();
+        let last: Vec<String> = slack
+            .rows()
+            .next_back()
+            .unwrap()
+            .iter()
+            .map(|c| c.to_string())
+            .collect();
+        assert_eq!(last, ["bananas and more", "", "4", "20", "16", "16"]);
     }
 }
