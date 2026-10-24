@@ -1,5 +1,5 @@
 //! Loaders, one module per input format, each behind the cargo feature of the same name
-//! (`csv` is on by default). Every format reads the same shapes, a header row then rows of cells,
+//! (`csv` is on by default; `xlsx` and `json` are opt-in). Every format reads the same shapes, a header row then rows of cells,
 //! so the column rules live here and a format module only turns its input into cells.
 //!
 //! Sources and sinks: one quantity column plus up to 8 category columns, in header order.
@@ -18,10 +18,17 @@
 //! The base matrix has no header: one row per source and one cell per sink, in table row order.
 //! An empty cell or `nan` means the pair can't be used.
 
-#![cfg_attr(not(feature = "csv"), allow(dead_code))]
+#![cfg_attr(
+    not(any(feature = "csv", feature = "xlsx", feature = "json")),
+    allow(dead_code)
+)]
 
 #[cfg(feature = "csv")]
 pub mod csv;
+#[cfg(feature = "json")]
+pub mod json;
+#[cfg(feature = "xlsx")]
+pub mod xlsx;
 
 use crate::core::BoxError;
 use crate::core::types::{CostRule, Header, Key, Op, SLOTS};
@@ -135,7 +142,8 @@ impl LayerColumns {
     }
 }
 
-/// One base matrix cell; empty or `nan` means the pair can't be used.
+/// One base matrix cell; empty or `nan` means the pair can't be used. (JSON uses `null`.)
+#[cfg(any(feature = "csv", feature = "xlsx"))]
 fn base_cost(cell: &str) -> Result<f64, BoxError> {
     if cell.is_empty() || cell.eq_ignore_ascii_case("nan") {
         return Ok(f64::NAN);

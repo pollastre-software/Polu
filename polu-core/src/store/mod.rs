@@ -1,11 +1,18 @@
 //! Stores, one module per output format, each behind the cargo feature of the same name
-//! (`csv` is on by default). Every format writes the same table: one row per flow with the
+//! (`csv` is on by default; `xlsx` and `json` are opt-in). Every format writes the same table: one row per flow with the
 //! source's category columns (`source.<column>`), the sink's (`sink.<column>`), then `units`.
 
-#![cfg_attr(not(feature = "csv"), allow(dead_code))]
+#![cfg_attr(
+    not(any(feature = "csv", feature = "xlsx", feature = "json")),
+    allow(dead_code)
+)]
 
 #[cfg(feature = "csv")]
 pub mod csv;
+#[cfg(feature = "json")]
+pub mod json;
+#[cfg(feature = "xlsx")]
+pub mod xlsx;
 
 use crate::core::types::{Assignment, Header, SinkList, SourceList};
 
