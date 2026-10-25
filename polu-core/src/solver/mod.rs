@@ -4,7 +4,7 @@ use highs::{ColProblem, HighsModelStatus, Row, Sense};
 
 use crate::core::BoxError;
 use crate::core::traits::Solver;
-use crate::core::types::{Assignment, Flow, Limit, Problem};
+use crate::core::types::{Assignment, Limit, Problem};
 
 /// Solves the transport problem as a MIP: one integer column per route, one `<=` row per supply limit
 /// and one `==` row per demand limit. A route counts towards every limit containing its source or sink.
@@ -67,22 +67,7 @@ impl Solver for HighsSolver {
             other => return Err(format!("HiGHS stopped without an optimum: {other:?}").into()),
         }
 
-        let mut flows = Vec::new();
-        let mut objective = 0.0;
-        for (route, &x) in problem.routes.iter().zip(solved.get_solution().columns()) {
-            let units = x.round() as i64;
-            if units > 0 {
-                flows.push(Flow {
-                    source: route.source,
-                    sink: route.sink,
-                    units,
-                });
-                // summed from the rounded flows so it matches them exactly
-                objective += route.cost * units as f64;
-            }
-        }
-
-        Ok(Assignment { flows, objective })
+        Ok(problem.assignment(solved.get_solution().columns()))
     }
 }
 
@@ -100,7 +85,7 @@ fn rows_per_member(limits: &[Limit], rows: &[Row]) -> Vec<Vec<Row>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::types::{Limit, Route};
+    use crate::core::types::{Flow, Limit, Route};
 
     fn route(source: usize, sink: usize, cost: f64) -> Route {
         Route { source, sink, cost }

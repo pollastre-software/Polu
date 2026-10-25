@@ -891,4 +891,52 @@ mod tests {
         polu.load_data().unwrap();
         assert!(matches!(polu.run(), Err(PoluError::Solve(_))));
     }
+
+    #[test]
+    fn lp_text_has_a_row_per_limit() {
+        let problem = Problem {
+            routes: vec![
+                Route {
+                    source: 0,
+                    sink: 0,
+                    cost: 2.0,
+                },
+                Route {
+                    source: 1,
+                    sink: 0,
+                    cost: -0.5,
+                },
+            ],
+            // source 0 also covers source 1; source 2 has no route
+            supply: vec![
+                Limit {
+                    rows: vec![0, 1],
+                    amount: 5,
+                },
+                Limit {
+                    rows: vec![1],
+                    amount: 3,
+                },
+                Limit {
+                    rows: vec![2],
+                    amount: 4,
+                },
+            ],
+            demand: vec![
+                Limit {
+                    rows: vec![0],
+                    amount: 6,
+                },
+                Limit {
+                    rows: vec![1],
+                    amount: 1,
+                },
+            ],
+        };
+        assert_eq!(
+            problem.to_lp(),
+            "Minimize\n obj: + 2 x0 - 0.5 x1\nSubject To\n s0: + 1 x0 + 1 x1 <= 5\n s1: + 1 x1 <= 3\n \
+             d0: + 1 x0 + 1 x1 = 6\n d1: 0 x0 = 1\nGeneral\n x0 x1\nEnd\n"
+        );
+    }
 }

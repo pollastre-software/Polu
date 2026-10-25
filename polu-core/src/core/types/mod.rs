@@ -161,6 +161,96 @@ impl Problem {
             })
             .collect()
     }
+
+    /// The assignment for one solved value per route (`columns[i]` is `routes[i]`), rounded to whole
+    /// units. The objective is summed from the rounded flows so it matches them exactly.
+    pub fn assignment(&self, columns: &[f64]) -> Assignment {
+        let mut flows = Vec::new();
+        let mut objective = 0.0;
+        for (route, &x) in self.routes.iter().zip(columns) {
+            let units = x.round() as i64;
+            if units > 0 {
+                flows.push(Flow {
+                    source: route.source,
+                    sink: route.sink,
+                    units,
+                });
+                objective += route.cost * units as f64;
+            }
+        }
+        Assignment { flows, objective }
+    }
+
+    /// The problem in CPLEX LP format, for solvers that take text (e.g. HiGHS in the browser).
+    /// Column `x{i}` is `routes[i]`; row `s{i}` is `supply[i]` and `d{j}` is `demand[j]`.
+    /// Supply limits no route touches always hold and are left out.
+    pub fn to_lp(&self) -> String {
+        use std::fmt::Write;
+
+        let (in_supply, in_demand) = (
+            members(&self.supply, |r| r.source, &self.routes),
+            members(&self.demand, |r| r.sink, &self.routes),
+        );
+        let mut lp = String::from("Minimize\n obj:");
+        terms(&mut lp, self.routes.iter().map(|r| r.cost).enumerate());
+        lp.push_str("\nSubject To\n");
+        for (name, limits, members, op) in [
+            ('s', &self.supply, &in_supply, "<="),
+            ('d', &self.demand, &in_demand, "="),
+        ] {
+            for (i, (limit, columns)) in limits.iter().zip(members).enumerate() {
+                if columns.is_empty() && op == "<=" {
+                    continue;
+                }
+                let _ = write!(lp, " {name}{i}:");
+                if columns.is_empty() {
+                    // an unreachable demand still needs its row, so the solver reports it infeasible
+                    lp.push_str(" 0 x0");
+                }
+                terms(&mut lp, columns.iter().map(|&c| (c, 1.0)));
+                let _ = writeln!(lp, " {op} {}", limit.amount);
+            }
+        }
+        lp.push_str("General\n");
+        for c in 0..self.routes.len() {
+            let _ = write!(lp, " x{c}");
+            if c % 16 == 15 {
+                lp.push('\n');
+            }
+        }
+        lp.push_str("\nEnd\n");
+        lp
+    }
+}
+
+/// For each limit, the routes whose source (or sink, per `side`) is one of its rows.
+fn members(limits: &[Limit], side: impl Fn(&Route) -> usize, routes: &[Route]) -> Vec<Vec<usize>> {
+    let mut in_limits = vec![Vec::new(); limits.len()];
+    for (l, limit) in limits.iter().enumerate() {
+        for &row in &limit.rows {
+            in_limits[row].push(l);
+        }
+    }
+    let mut members = vec![Vec::new(); limits.len()];
+    for (c, route) in routes.iter().enumerate() {
+        for &l in &in_limits[side(route)] {
+            members[l].push(c);
+        }
+    }
+    members
+}
+
+/// Appends ` + 2 x0 - 1.5 x3 ...`, breaking lines so LP readers with a line limit accept them.
+fn terms(lp: &mut String, terms: impl Iterator<Item = (usize, f64)>) {
+    use std::fmt::Write;
+
+    for (n, (c, coef)) in terms.enumerate() {
+        let sign = if coef < 0.0 { '-' } else { '+' };
+        if n > 0 && n % 8 == 0 {
+            lp.push_str("\n   ");
+        }
+        let _ = write!(lp, " {sign} {} x{c}", coef.abs());
+    }
 }
 
 /// How much of one supply limit a solution leaves unused.

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Polu demo</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="title">
+        <h1>Polu</h1>
+        <button id="theme" type="button" class="ghost small">Theme</button>
+      </div>
+      <p>
+        Transport planning in the browser: polu-core compiled to WebAssembly, solved with HiGHS.
+        Edit the tables, drop in CSV, JSON or Excel files, and the plan re-solves as you type.
+      </p>
+    </header>
+    <main>
+      <section id="inputs" aria-label="Inputs">
+        <div class="toolbar">
+          <label>
+            Scenario
+            <select id="example">
+              <!-- the scenarios from demo-scenarios/ go first -->
+              <option value="generated">Generated network</option>
+            </select>
+          </label>
+          <span id="generator" hidden>
+            <label>Sources <input id="gen-sources" type="number" min="2" max="400" value="40" /></label>
+            <label>Sinks <input id="gen-sinks" type="number" min="2" max="400" value="60" /></label>
+            <button id="generate" type="button">Generate</button>
+          </span>
+        </div>
+        <p class="hint">
+          Drop a file on a card to replace it, or drop a workbook anywhere with sheets named
+          <code>sources</code>, <code>sinks</code>, <code>base</code> and <code>costs-&lt;op&gt;</code>.
+        </p>
+        <div id="cards"></div>
+        <button id="add-layer" type="button" class="ghost">+ Add layer</button>
+      </section>
+
+      <section id="results" aria-label="Results">
+        <div class="toolbar">
+          <button id="solve" type="button">Solve</button>
+          <label class="check"><input id="auto" type="checkbox" checked /> Solve on every edit</label>
+          <span id="status" class="muted">Loading WebAssembly…</span>
+        </div>
+        <div id="error" class="error" hidden></div>
+        <div id="summary" class="summary"></div>
+        <nav class="tabs" role="tablist">
+          <button role="tab" data-tab="flows" aria-selected="true">Flows</button>
+          <button role="tab" data-tab="costmap">Cost map</button>
+          <button role="tab" data-tab="unused">Unused capacity</button>
+          <button role="tab" data-tab="lp">LP</button>
+        </nav>
+        <div id="panel"></div>
+        <div id="trace" class="trace" hidden></div>
+        <div class="downloads">
+          <span>Download flows</span>
+          <button data-export="flows" data-format="csv" class="ghost">CSV</button>
+          <button data-export="flows" data-format="json" class="ghost">JSON</button>
+          <button data-export="flows" data-format="xlsx" class="ghost">Excel</button>
+          <span>Unused capacity</span>
+          <button data-export="slack" data-format="csv" class="ghost">CSV</button>
+          <button data-export="slack" data-format="json" class="ghost">JSON</button>
+          <button data-export="slack" data-format="xlsx" class="ghost">Excel</button>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

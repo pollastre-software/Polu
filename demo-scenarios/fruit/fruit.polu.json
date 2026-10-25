@@ -1,0 +1,24 @@
+{
+  "sources": {
+    "path": "sources.csv",
+    "quantity": "capacity"
+  },
+  "sinks": {
+    "path": "sinks.csv",
+    "quantity": "demand"
+  },
+  "layers": [
+    {
+      "path": "costs-set.csv",
+      "op": "set"
+    },
+    {
+      "path": "costs-scale.csv",
+      "op": "scale"
+    },
+    {
+      "path": "costs-block.csv",
+      "op": "block"
+    }
+  ]
+}

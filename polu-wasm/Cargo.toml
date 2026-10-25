@@ -1,0 +1,19 @@
+[package]
+name = "polu-wasm"
+version = "0.1.0"
+edition = "2024"
+description = "polu-core for the browser: load, solve with a JS LP solver, inspect and export"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# no `highs`: the browser solves with a JS solver through `JsSolver`
+polu-core = { path = "../polu-core", default-features = false, features = ["csv", "json", "xlsx"] }
+js-sys = "0.3"
+# its `wasm` feature takes the workbook timestamp from JS, as wasm32 has no system clock
+rust_xlsxwriter = { version = "0.101", features = ["wasm"] }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
