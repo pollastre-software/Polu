@@ -103,6 +103,43 @@ impl Table {
             })
             .collect()
     }
+
+    /// One limit per row of `caps`, over the rows of this table it matches: every field the cap sets
+    /// must be set and equal in the row (as `Scale`, `Add` and `Block` rules match). Cap columns are
+    /// matched to this table's columns by name. A cap that matches no row is left out.
+    pub fn caps(&self, caps: &Table) -> Result<Vec<Limit>, PoluError> {
+        // (cap slot, table slot)
+        let mut slots = Vec::new();
+        for (c, name) in caps.header.iter().enumerate() {
+            let Some(name) = name.as_deref() else {
+                continue;
+            };
+            let slot = self
+                .header
+                .iter()
+                .position(|h| h.as_deref() == Some(name))
+                .ok_or_else(|| {
+                    PoluError::Invalid(format!("cap column `{name}` is not in the table"))
+                })?;
+            slots.push((c, slot));
+        }
+        let index = RowIndex::new(self);
+        Ok(caps
+            .rows
+            .iter()
+            .filter_map(|(cap, amount)| {
+                let mut fields: [Option<Box<str>>; SLOTS] = Default::default();
+                for &(c, slot) in &slots {
+                    fields[slot] = cap.0[c].clone();
+                }
+                let rows = index.rows_matching(&Key(fields), false);
+                (!rows.is_empty()).then_some(Limit {
+                    rows,
+                    amount: *amount,
+                })
+            })
+            .collect())
+    }
 }
 
 /// A usable source/sink pair and its unit cost. Indices point into the source and sink tables.
@@ -121,12 +158,14 @@ pub struct Limit {
 }
 
 /// Solver-neutral transport problem: minimise the sum of cost * flow over `routes`, with integer flows,
-/// total flow out of the rows of each `supply` limit `<= amount` and total flow into the rows of each
-/// `demand` limit `== amount`. `supply[i]` and `demand[j]` belong to source row i and sink row j.
+/// total flow out of the rows of each `supply` and `caps` limit `<= amount` and total flow into the rows
+/// of each `demand` limit `== amount`. `supply[i]` and `demand[j]` belong to source row i and sink row j;
+/// `caps` come from a source cap table (see [`Table::caps`]) and belong to no row, so they add no routes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Problem {
     pub routes: Vec<Route>,
     pub supply: Vec<Limit>,
+    pub caps: Vec<Limit>,
     pub demand: Vec<Limit>,
 }
 
@@ -138,21 +177,18 @@ impl Problem {
         for flow in &assignment.flows {
             shipped[flow.source] += flow.units;
         }
-        let used: Vec<i64> = self
-            .supply
-            .iter()
-            .map(|limit| limit.rows.iter().map(|&r| shipped[r]).sum())
-            .collect();
-        // a row can ship more only while every limit over it has room
+        let used = |limit: &Limit| -> i64 { limit.rows.iter().map(|&r| shipped[r]).sum() };
+        // a row can ship more only while every limit over it, caps included, has room
         let mut spare: Vec<i64> = vec![i64::MAX; self.supply.len()];
-        for (limit, used) in self.supply.iter().zip(&used) {
+        for limit in self.supply.iter().chain(&self.caps) {
+            let unused = limit.amount - used(limit);
             for &r in &limit.rows {
-                spare[r] = spare[r].min(limit.amount - used);
+                spare[r] = spare[r].min(unused);
             }
         }
         self.supply
             .iter()
-            .zip(used)
+            .map(|limit| (limit, used(limit)))
             .zip(spare)
             .map(|((limit, used), spare)| Slack {
                 used,
@@ -182,20 +218,23 @@ impl Problem {
     }
 
     /// The problem in CPLEX LP format, for solvers that take text (e.g. HiGHS in the browser).
-    /// Column `x{i}` is `routes[i]`; row `s{i}` is `supply[i]` and `d{j}` is `demand[j]`.
-    /// Supply limits no route touches always hold and are left out.
+    /// Column `x{i}` is `routes[i]`; row `s{i}` is `supply[i]`, `c{i}` is `caps[i]` and `d{j}` is
+    /// `demand[j]`. Supply limits and caps no route touches always hold and are left out.
     pub fn to_lp(&self) -> String {
         use std::fmt::Write;
 
-        let (in_supply, in_demand) = (
-            members(&self.supply, |r| r.source, &self.routes),
-            members(&self.demand, |r| r.sink, &self.routes),
+        let (sources, sinks) = (self.supply.len(), self.demand.len());
+        let (in_supply, in_caps, in_demand) = (
+            members(&self.supply, sources, |r| r.source, &self.routes),
+            members(&self.caps, sources, |r| r.source, &self.routes),
+            members(&self.demand, sinks, |r| r.sink, &self.routes),
         );
         let mut lp = String::from("Minimize\n obj:");
         terms(&mut lp, self.routes.iter().map(|r| r.cost).enumerate());
         lp.push_str("\nSubject To\n");
         for (name, limits, members, op) in [
             ('s', &self.supply, &in_supply, "<="),
+            ('c', &self.caps, &in_caps, "<="),
             ('d', &self.demand, &in_demand, "="),
         ] {
             for (i, (limit, columns)) in limits.iter().zip(members).enumerate() {
@@ -223,9 +262,15 @@ impl Problem {
     }
 }
 
-/// For each limit, the routes whose source (or sink, per `side`) is one of its rows.
-fn members(limits: &[Limit], side: impl Fn(&Route) -> usize, routes: &[Route]) -> Vec<Vec<usize>> {
-    let mut in_limits = vec![Vec::new(); limits.len()];
+/// For each limit over a table of `rows` rows, the routes whose source (or sink, per `side`) is one of
+/// its rows.
+fn members(
+    limits: &[Limit],
+    rows: usize,
+    side: impl Fn(&Route) -> usize,
+    routes: &[Route],
+) -> Vec<Vec<usize>> {
+    let mut in_limits = vec![Vec::new(); rows];
     for (l, limit) in limits.iter().enumerate() {
         for &row in &limit.rows {
             in_limits[row].push(l);
@@ -261,7 +306,7 @@ pub struct Slack {
     /// The limit's amount.
     pub amount: i64,
     /// Units the row itself could still ship before some limit over it is full: the smallest
-    /// [`unused`](Slack::unused) of every limit that includes the row.
+    /// [`unused`](Slack::unused) of every limit that includes the row, caps included.
     pub spare: i64,
 }
 

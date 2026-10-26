@@ -83,6 +83,7 @@ pub fn formulate(
     Ok(Problem {
         routes,
         supply: limits(sources),
+        caps: Vec::new(),
         demand: limits(sinks),
     })
 }
@@ -646,6 +647,80 @@ mod tests {
         assert_eq!(rows(&problem.demand), [vec![0], vec![1]]);
     }
 
+    #[test]
+    fn caps_limit_the_rows_they_match() {
+        let sources = Table::new(
+            header(&["region", "site"]),
+            vec![
+                (key(&["apple inc", "large"]), 3),
+                (key(&["apple inc", "small"]), 7),
+                (key(&["apple inc"]), 5),
+                (key(&["bananas and more", "large"]), 4),
+            ],
+        )
+        .unwrap();
+        let rows = |caps: &[Limit]| caps.iter().map(|l| l.rows.clone()).collect::<Vec<_>>();
+
+        // columns are matched by name, so a cap table can name fewer columns, in any order
+        let by_site = Table::new(
+            header(&["site"]),
+            vec![(key(&["large"]), 6), (key(&["huge"]), 9)],
+        )
+        .unwrap();
+        let caps = sources.caps(&by_site).unwrap();
+        // [large] covers both large rows; [huge] matches nothing and is left out;
+        // the partial [apple inc, *] row has no site, so no site cap reaches it
+        assert_eq!(rows(&caps), [vec![0, 3]]);
+        assert_eq!(caps[0].amount, 6);
+
+        let by_region = Table::new(header(&["region"]), vec![(key(&["apple inc"]), 8)]).unwrap();
+        assert_eq!(rows(&sources.caps(&by_region).unwrap()), [vec![0, 1, 2]]);
+
+        let unknown = Table::new(header(&["store"]), vec![(key(&["WA"]), 1)]).unwrap();
+        assert!(matches!(sources.caps(&unknown), Err(PoluError::Invalid(_))));
+    }
+
+    #[test]
+    fn caps_count_towards_spare() {
+        // rows 0 and 1 have room of their own (10 and 10), but a cap of 6 spans both
+        let problem = Problem {
+            routes: vec![],
+            supply: vec![
+                Limit {
+                    rows: vec![0],
+                    amount: 10,
+                },
+                Limit {
+                    rows: vec![1],
+                    amount: 10,
+                },
+            ],
+            caps: vec![Limit {
+                rows: vec![0, 1],
+                amount: 6,
+            }],
+            demand: vec![],
+        };
+        let shipped = Assignment {
+            flows: vec![Flow {
+                source: 0,
+                sink: 0,
+                units: 4,
+            }],
+            objective: 0.0,
+        };
+        let slack = problem.slack(&shipped);
+        // the cap leaves 2, so neither row can ship more than that, while each row's own limit is unchanged
+        assert_eq!(
+            (slack[0].used, slack[0].unused(), slack[0].spare),
+            (4, 6, 2)
+        );
+        assert_eq!(
+            (slack[1].used, slack[1].unused(), slack[1].spare),
+            (0, 10, 2)
+        );
+    }
+
     /// Business total 5 over [large] = 3 and [small] = 7: at most 5 apple inc units ship in total,
     /// while each size keeps its own cost.
     #[cfg(feature = "highs")]
@@ -893,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn lp_text_has_a_row_per_limit() {
+    fn lp_text_has_a_row_per_limit_and_cap() {
         let problem = Problem {
             routes: vec![
                 Route {
@@ -922,6 +997,17 @@ mod tests {
                     amount: 4,
                 },
             ],
+            // a cap over sources 1 and 2; one over source 2 alone has no route and is left out
+            caps: vec![
+                Limit {
+                    rows: vec![1, 2],
+                    amount: 2,
+                },
+                Limit {
+                    rows: vec![2],
+                    amount: 1,
+                },
+            ],
             demand: vec![
                 Limit {
                     rows: vec![0],
@@ -935,7 +1021,7 @@ mod tests {
         };
         assert_eq!(
             problem.to_lp(),
-            "Minimize\n obj: + 2 x0 - 0.5 x1\nSubject To\n s0: + 1 x0 + 1 x1 <= 5\n s1: + 1 x1 <= 3\n \
+            "Minimize\n obj: + 2 x0 - 0.5 x1\nSubject To\n s0: + 1 x0 + 1 x1 <= 5\n s1: + 1 x1 <= 3\n c0: + 1 x1 <= 2\n \
              d0: + 1 x0 + 1 x1 = 6\n d1: 0 x0 = 1\nGeneral\n x0 x1\nEnd\n"
         );
     }

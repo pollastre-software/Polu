@@ -118,12 +118,14 @@ mod tests {
         let short = Problem {
             routes: routes.clone(),
             supply: supply.clone(),
+            caps: Vec::new(),
             demand: limits(&[8]),
         };
         assert!(HighsSolver::default().solve(&short).is_err()); // independent pools would allow 8
         let fits = Problem {
             routes,
             supply,
+            caps: Vec::new(),
             demand: limits(&[5]),
         };
         let a = HighsSolver::default().solve(&fits).unwrap();
@@ -151,6 +153,7 @@ mod tests {
         let problem = Problem {
             routes: vec![route(0, 0, 1.0), route(0, 1, 1.0)],
             supply: limits(&[20]),
+            caps: Vec::new(),
             demand: vec![limit(&[0, 1], 10), limit(&[1], 4)],
         };
         let a = HighsSolver::default().solve(&problem).unwrap();
@@ -182,6 +185,7 @@ mod tests {
                 route(1, 1, 3.0),
             ],
             supply: limits(&[6, 10]),
+            caps: Vec::new(),
             demand: limits(&[4, 5]),
         };
         let a = HighsSolver::default().solve(&problem).unwrap();
@@ -215,6 +219,7 @@ mod tests {
         let problem = Problem {
             routes: vec![route(0, 0, 1.0), route(1, 0, 1.0)],
             supply: limits(&[2, 2]),
+            caps: Vec::new(),
             demand: limits(&[3]),
         };
         let a = HighsSolver::default().solve(&problem).unwrap();
@@ -227,6 +232,7 @@ mod tests {
         let problem = Problem {
             routes: vec![route(0, 0, 1.0)],
             supply: limits(&[2]),
+            caps: Vec::new(),
             demand: limits(&[3]),
         };
         assert!(HighsSolver::default().solve(&problem).is_err());
@@ -237,6 +243,7 @@ mod tests {
         let problem = Problem {
             routes: vec![route(0, 0, 1.0)],
             supply: limits(&[10]),
+            caps: Vec::new(),
             demand: limits(&[1, 1]),
         };
         assert!(HighsSolver::default().solve(&problem).is_err());
@@ -247,6 +254,7 @@ mod tests {
         let problem = Problem {
             routes: vec![],
             supply: limits(&[5]),
+            caps: Vec::new(),
             demand: limits(&[0]),
         };
         let a = HighsSolver::default().solve(&problem).unwrap();
