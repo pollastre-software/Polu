@@ -126,6 +126,17 @@ fn inputs(frame: &mut Frame, area: Rect, app: &mut App) {
                         count,
                     )
                 }
+                Slot::Caps => (
+                    "Caps".into(),
+                    app.scenario.caps.as_ref().map(|i| i.file.label()),
+                    Some(match &app.scenario.caps {
+                        Some(i) => format!("quantity: {}", i.quantity),
+                        None => "source caps, optional".into(),
+                    }),
+                    loaded
+                        .and_then(|ld| ld.polu.source_caps())
+                        .map(|caps| format!("{} rows", caps.rows().len())),
+                ),
                 Slot::Base => (
                     "Base".into(),
                     app.scenario.base.as_ref().map(|f| f.label()),
@@ -575,6 +586,7 @@ fn popup(frame: &mut Frame, app: &mut App) {
         } => {
             let title = match slot {
                 Slot::Sources => " Sources file ",
+                Slot::Caps => " Source caps file (each row caps the source rows it matches) ",
                 Slot::Sinks => " Sinks file ",
                 Slot::Base => " Base file (a matrix, or rules applied first) ",
                 Slot::Layer(_) | Slot::NewLayer => " Layer file ",

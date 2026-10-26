@@ -79,7 +79,7 @@ impl FileRef {
     }
 }
 
-/// Sources or sinks: the file and its quantity column.
+/// Sources, sinks or source caps: the file and its quantity column.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableInput {
     #[serde(flatten)]
@@ -100,6 +100,9 @@ pub struct LayerInput {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Scenario {
     pub sources: Option<TableInput>,
+    /// Caps over the source rows each of its rows matches, see [`polu_core::Table::caps`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<TableInput>,
     pub sinks: Option<TableInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<FileRef>,
@@ -131,7 +134,7 @@ impl Scenario {
     }
 
     fn files_mut(&mut self, mut f: impl FnMut(&mut FileRef)) {
-        let tables = [&mut self.sources, &mut self.sinks];
+        let tables = [&mut self.sources, &mut self.caps, &mut self.sinks];
         tables.into_iter().flatten().for_each(|t| f(&mut t.file));
         self.base.iter_mut().for_each(&mut f);
         self.layers.iter_mut().for_each(|l| f(&mut l.file));
@@ -198,7 +201,7 @@ pub fn column_names(file: &FileRef) -> Result<Vec<String>, BoxError> {
     }
 }
 
-/// A loader for sources or sinks, and the header the costmap loader needs.
+/// A loader for sources, sinks or source caps, and the header the costmap loader needs.
 pub fn table_loader(input: &TableInput) -> Result<(Box<dyn Load<Table>>, Header), BoxError> {
     let (file, quantity) = (&input.file, input.quantity.as_str());
     match Format::check(&file.path)? {
@@ -434,6 +437,10 @@ mod tests {
                 file: file("sources.csv"),
                 quantity: "capacity".into(),
             }),
+            caps: Some(TableInput {
+                file: file("caps.csv"),
+                quantity: "cap".into(),
+            }),
             sinks: None,
             base: None,
             layers: vec![LayerInput {
@@ -446,6 +453,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains(r#""path": "data/scale.csv""#), "{text}");
         assert!(text.contains(r#""op": "scale""#));
+        assert!(text.contains(r#""path": "data/caps.csv""#), "{text}");
         assert_eq!(Scenario::open(&path).unwrap(), scenario);
         std::fs::remove_dir_all(&dir).ok();
     }

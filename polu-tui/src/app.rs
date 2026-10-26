@@ -39,6 +39,7 @@ impl Tab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     Sources,
+    Caps,
     Sinks,
     Base,
     Layer(usize),
@@ -215,6 +216,18 @@ impl Loaded {
         self.problem().routes.len()
     }
 
+    /// `, 2 caps` for the load message, naming caps that match no source row (they're left out).
+    pub fn caps_note(&self) -> String {
+        let Some(table) = self.polu.source_caps() else {
+            return String::new();
+        };
+        let (rows, used) = (table.rows().len(), self.problem().caps.len());
+        match rows - used {
+            0 => format!(", {rows} caps"),
+            unmatched => format!(", {rows} caps ({unmatched} match no source)"),
+        }
+    }
+
     pub fn trace(&self, cell: usize) -> Trace {
         let (sources, sinks) = self.tables();
         let nk = sinks.rows().len();
@@ -268,6 +281,8 @@ pub struct App {
 const PAGE: usize = 20;
 /// Files listed by the file search.
 const MAX_FILES: usize = 20_000;
+/// The Inputs row of the first layer, after sources, caps, sinks and base.
+const FIRST_LAYER_SLOT: usize = 4;
 
 impl App {
     pub fn new(root: PathBuf) -> Self {
@@ -310,7 +325,7 @@ impl App {
     }
 
     pub fn slots(&self) -> Vec<Slot> {
-        let mut slots = vec![Slot::Sources, Slot::Sinks, Slot::Base];
+        let mut slots = vec![Slot::Sources, Slot::Caps, Slot::Sinks, Slot::Base];
         slots.extend((0..self.scenario.layers.len()).map(Slot::Layer));
         slots.push(Slot::NewLayer);
         slots
@@ -377,8 +392,9 @@ impl App {
                     took: started.elapsed(),
                 };
                 self.info(format!(
-                    "loaded {ns} sources, {nk} sinks, {} routes in {:.2}s",
+                    "loaded {ns} sources, {nk} sinks, {} routes{} in {:.2}s",
                     loaded.routes(),
+                    loaded.caps_note(),
                     loaded.took.as_secs_f64()
                 ));
                 self.loaded = Some(loaded);
@@ -414,6 +430,9 @@ impl App {
             Box::new(HighsSolver::default()),
             Box::new(NoStore),
         );
+        if let Some(caps) = &self.scenario.caps {
+            polu = polu.with_source_caps(io::table_loader(caps)?.0);
+        }
         polu.load_data()?;
         Ok((polu, scenario))
     }
@@ -784,7 +803,7 @@ impl App {
                     };
                     if let Some(to) = to {
                         self.scenario.layers.swap(l, to);
-                        self.slot = 3 + to;
+                        self.slot = FIRST_LAYER_SLOT + to;
                         self.changed();
                     }
                 }
@@ -792,6 +811,7 @@ impl App {
             KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace => {
                 match slot {
                     Slot::Sources => self.scenario.sources = None,
+                    Slot::Caps => self.scenario.caps = None,
                     Slot::Sinks => self.scenario.sinks = None,
                     Slot::Base => self.scenario.base = None,
                     Slot::Layer(l) => {
@@ -985,6 +1005,7 @@ impl App {
                 };
                 match slot {
                     Slot::Sinks => self.scenario.sinks = Some(input),
+                    Slot::Caps => self.scenario.caps = Some(input),
                     _ => self.scenario.sources = Some(input),
                 }
                 self.changed();
@@ -994,9 +1015,11 @@ impl App {
 
     fn picked_input(&mut self, slot: Slot, file: FileRef) {
         match slot {
-            Slot::Sources | Slot::Sinks => match io::column_names(&file) {
+            Slot::Sources | Slot::Caps | Slot::Sinks => match io::column_names(&file) {
                 Ok(columns) => {
-                    let guess = ["capacity", "supply", "demand", "quantity", "qty", "units"];
+                    let guess = [
+                        "capacity", "supply", "demand", "cap", "quantity", "qty", "units",
+                    ];
                     let selected = columns
                         .iter()
                         .position(|c| guess.contains(&c.to_ascii_lowercase().as_str()))
@@ -1025,7 +1048,7 @@ impl App {
                     Op::Scale
                 };
                 self.scenario.layers.push(LayerInput { file, op });
-                self.slot = 3 + self.scenario.layers.len() - 1;
+                self.slot = FIRST_LAYER_SLOT + self.scenario.layers.len() - 1;
                 self.changed();
             }
         }
@@ -1460,7 +1483,7 @@ pub(crate) mod tests {
         assert_eq!(app.scenario.sources.as_ref().unwrap().quantity, "capacity");
 
         // a new layer starts as Set, and arrows cycle its operator
-        app.slot = 3;
+        app.slot = FIRST_LAYER_SLOT;
         key(&mut app, KeyCode::Enter);
         press(&mut app, "costs-scale.csv");
         key(&mut app, KeyCode::Enter);
@@ -1469,6 +1492,34 @@ pub(crate) mod tests {
         assert_eq!(app.scenario.layers[0].op, Op::Scale);
         press(&mut app, "x");
         assert!(app.scenario.layers.is_empty());
+    }
+
+    #[cfg(feature = "csv")]
+    #[test]
+    fn source_caps_tighten_the_plan() {
+        let caps = std::env::temp_dir().join(format!("polu-tui-caps-{}.csv", std::process::id()));
+        std::fs::write(&caps, "business,cap\napple inc,2\ncherries,1\n").unwrap();
+        let mut app = App::new(sample(""));
+        app.open_scenario(&sample("apples.polu.json"));
+        app.scenario.caps = Some(TableInput {
+            file: FileRef {
+                path: caps.clone(),
+                sheet: None,
+            },
+            quantity: "cap".into(),
+        });
+        press(&mut app, "l");
+        std::fs::remove_file(&caps).ok();
+        let message = &app.message.as_ref().unwrap().1;
+        assert!(message.contains("2 caps (1 match no source)"), "{message}");
+        // the apple inc cap spans all three apple inc rows
+        let loaded = app.loaded.as_ref().unwrap();
+        assert_eq!(loaded.problem().caps[0].rows, [0, 1, 2]);
+
+        // apple inc ships 2 instead of 5; bananas and more makes up the rest at 3 and 4 a unit
+        press(&mut app, "4s");
+        app.wait();
+        assert_eq!(app.assignment().unwrap().objective, 26.0);
     }
 
     #[test]
