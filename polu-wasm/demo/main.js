@@ -59,15 +59,17 @@ async function loadScenario(path) {
       ? { name, text: await response.text() }
       : { name, sheet, bytes: new Uint8Array(await response.arrayBuffer()) };
   };
+  const table = async (input) => input && { ...(await file(input)), quantity: input.quantity };
   return {
-    sources: { ...(await file(scenario.sources)), quantity: scenario.sources.quantity },
-    sinks: { ...(await file(scenario.sinks)), quantity: scenario.sinks.quantity },
+    sources: await table(scenario.sources),
+    caps: await table(scenario.caps),
+    sinks: await table(scenario.sinks),
     base: scenario.base ? await file(scenario.base) : null,
     layers: await Promise.all((scenario.layers ?? []).map(async (l) => ({ ...(await file(l)), op: l.op }))),
   };
 }
 
-/** Maps a workbook's sheets onto inputs by name: sources, sinks, base, costs-<op>. */
+/** Maps a workbook's sheets onto inputs by name: sources, caps, sinks, base, costs-<op>. */
 function fromWorkbook(name, bytes) {
   const sheets = sheetNames(bytes);
   const sheet = (s, extra) => ({ name, bytes, sheet: s, ...extra });
@@ -80,6 +82,7 @@ function fromWorkbook(name, bytes) {
   }
   return {
     sources: sheet("sources", { quantity: quantity("sources") }),
+    caps: sheets.includes("caps") ? sheet("caps", { quantity: quantity("caps") }) : null,
     sinks: sheet("sinks", { quantity: quantity("sinks") }),
     base: sheets.includes("base") ? sheet("base") : null,
     layers: sheets
@@ -89,7 +92,7 @@ function fromWorkbook(name, bytes) {
 }
 
 /**
- * A synthetic network: businesses with sized sites and a business-wide cap, stores in states,
+ * A synthetic network: businesses with sized sites, a cap per business, stores in states,
  * a distance base matrix, a small-site surcharge and a few blocked business/state pairs.
  */
 function generated(nSources, nSinks) {
@@ -97,16 +100,14 @@ function generated(nSources, nSinks) {
   const rand = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
   const states = ["WA", "OR", "CA", "TX", "OH", "NY", "FL", "IL"];
   const sources = [];
+  const caps = [];
   for (let b = 0; sources.length < nSources; b++) {
     const business = `business ${b + 1}`;
     const sizes = ["large", "small"].slice(0, Math.min(2, nSources - sources.length));
-    const caps = sizes.map(() => 20 + Math.floor(rand() * 60));
-    sizes.forEach((size, i) => sources.push({ business, size, cap: caps[i], x: rand(), y: rand() }));
-    // the business row caps its sites together, below their sum
-    if (sources.length < nSources) {
-      const total = Math.floor(caps.reduce((a, c) => a + c, 0) * 0.8);
-      sources.push({ business, size: "", cap: total, x: rand(), y: rand() });
-    }
+    const sites = sizes.map(() => 20 + Math.floor(rand() * 60));
+    sizes.forEach((size, i) => sources.push({ business, size, cap: sites[i], x: rand(), y: rand() }));
+    // the business cap bounds its sites together, below their sum
+    caps.push({ business, cap: Math.floor(sites.reduce((a, c) => a + c, 0) * 0.8) });
   }
   const sinks = Array.from({ length: nSinks }, (_, k) => ({
     store: `store ${k + 1}`,
@@ -116,7 +117,7 @@ function generated(nSources, nSinks) {
     y: rand(),
   }));
   // keep demand well under the business caps so the plan stays feasible
-  const capacity = sources.filter((s) => !s.size).reduce((a, s) => a + s.cap, 0) || 1;
+  const capacity = caps.reduce((a, c) => a + c.cap, 0) || 1;
   const demand = sinks.reduce((a, s) => a + s.demand, 0);
   const shrink = Math.min(1, (0.6 * capacity) / demand);
   sinks.forEach((s) => (s.demand = Math.max(1, Math.floor(s.demand * shrink))));
@@ -131,6 +132,11 @@ function generated(nSources, nSinks) {
       name: "sources.csv",
       text: "business,size,capacity\n" + sources.map((s) => `${s.business},${s.size},${s.cap}`).join("\n"),
       quantity: "capacity",
+    },
+    caps: {
+      name: "caps.csv",
+      text: "business,cap\n" + caps.map((c) => `${c.business},${c.cap}`).join("\n"),
+      quantity: "cap",
     },
     sinks: {
       name: "sinks.csv",
@@ -257,11 +263,33 @@ function renderCards() {
       extra: quantityPicker(spec.sources),
       onReplace: (i) => { spec.sources = { ...i, quantity: spec.sources.quantity }; renderCards(); changed(true); },
     }),
+  ];
+  if (spec.caps) {
+    cards.push(card("Source caps", spec.caps, {
+      extra: quantityPicker(spec.caps),
+      onReplace: (i) => { spec.caps = { ...i, quantity: spec.caps.quantity }; renderCards(); changed(true); },
+      onRemove: () => { spec.caps = null; renderCards(); changed(true); },
+    }));
+  } else {
+    const add = h("button", { type: "button", class: "ghost dashed" }, "+ Source caps (optional, drop a file here)");
+    // starts with the first source column as its header, so only rows are left to add
+    add.onclick = () => {
+      let column = "business";
+      try {
+        column = columnNames(spec.sources).find((c) => c !== spec.sources.quantity) ?? column;
+      } catch {}
+      spec.caps = { name: "caps.csv", text: `${column},cap\n`, quantity: "cap" };
+      renderCards();
+    };
+    droppable(add, (i) => { spec.caps = { ...i, quantity: "" }; renderCards(); changed(true); });
+    cards.push(add);
+  }
+  cards.push(
     card("Sinks", spec.sinks, {
       extra: quantityPicker(spec.sinks),
       onReplace: (i) => { spec.sinks = { ...i, quantity: spec.sinks.quantity }; renderCards(); changed(true); },
     }),
-  ];
+  );
   if (spec.base) {
     cards.push(card("Base costs", spec.base, {
       onReplace: (i) => { spec.base = i; renderCards(); changed(true); },

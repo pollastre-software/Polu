@@ -32,8 +32,8 @@ has to be served, by anything.
 
 ## Scenarios
 
-`demo-scenarios/` at the repository root holds one folder per scenario: its sources, sinks and
-costmap layers, plus one `*.polu.json` scenario file in the TUI's format (paths relative to it), so
+`demo-scenarios/` at the repository root holds one folder per scenario: its sources, source caps,
+sinks and costmap layers, plus one `*.polu.json` scenario file in the TUI's format (paths relative to it), so
 the TUI opens the same scenarios. The page lists every folder that has a scenario file; to add one,
 add a folder. `fruit` is the apples example.
 
@@ -61,6 +61,7 @@ const highs = await highsLoader({ locateFile: (file) => `./vendor/${file}` });
 const model = new Model(
   {
     sources: { name: "sources.csv", text: sourcesCsv, quantity: "capacity" },
+    caps: { name: "caps.csv", text: "business,cap\napple inc,5", quantity: "cap" }, // optional
     sinks: { name: "sinks.csv", text: sinksCsv, quantity: "demand" },
     base: { name: "base.xlsx", bytes: workbookBytes, sheet: "base" }, // optional
     layers: [{ name: "costs-set.csv", text: setCsv, op: "set" }],

@@ -10,6 +10,8 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Spec {
     pub sources: Input,
+    #[serde(default)]
+    pub caps: Option<Input>,
     pub sinks: Input,
     #[serde(default)]
     pub base: Option<Input>,
@@ -17,7 +19,7 @@ pub struct Spec {
     pub layers: Vec<Input>,
 }
 
-/// One file. `format` defaults to the extension of `name`. Sources and sinks need `quantity`,
+/// One file. `format` defaults to the extension of `name`. Sources, sinks and caps need `quantity`,
 /// layers need `op`; Excel files take an optional `sheet` (the first one by default).
 #[derive(Debug, Deserialize)]
 pub struct Input {
@@ -99,7 +101,7 @@ impl Input {
         }
     }
 
-    /// A loader for sources or sinks, and the header the costmap loader needs.
+    /// A loader for sources, sinks or source caps, and the header the costmap loader needs.
     pub fn table(&self, what: &str) -> Result<(Box<dyn Load<Table>>, Header), BoxError> {
         let at = |e: BoxError| -> BoxError { format!("{what} ({}): {e}", self.label()).into() };
         let quantity = self

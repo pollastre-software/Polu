@@ -1,7 +1,7 @@
 //! polu-core for the browser, built with `wasm-pack build polu-wasm --target web` (see `demo/build.sh`).
 //!
-//! A [`Model`] loads sources, sinks and costmap layers from file contents (CSV, JSON or Excel, as
-//! in [`polu_core::load`]), formulates the problem, solves it with a JS LP solver (see
+//! A [`Model`] loads sources, sinks, source caps and costmap layers from file contents (CSV, JSON
+//! or Excel, as in [`polu_core::load`]), formulates the problem, solves it with a JS LP solver (see
 //! [`solver::JsSolver`]), and hands back flows, unused capacity, cost traces and result files.
 //!
 //! ```js
@@ -36,13 +36,15 @@ export interface PoluInput {
   bytes?: Uint8Array;
   /** Excel sheet, the first one by default. */
   sheet?: string;
-  /** Sources and sinks: the quantity column. */
+  /** Sources, sinks and caps: the quantity column. */
   quantity?: string;
   /** Layers: what the layer does. */
   op?: "set" | "scale" | "add" | "block";
 }
 export interface PoluSpec {
   sources: PoluInput;
+  /** Source caps: each row caps the total out of the source rows it matches, with no routes of its own. */
+  caps?: PoluInput;
   sinks: PoluInput;
   /** A headerless cost matrix, or a rule table applied as a first `set` layer. */
   base?: PoluInput;
@@ -109,6 +111,10 @@ impl Model {
         let spec: input::Spec = serde_wasm_bindgen::from_value(spec)?;
         let (sources, source_header) = spec.sources.table("sources").map_err(js)?;
         let (sinks, sink_header) = spec.sinks.table("sinks").map_err(js)?;
+        let caps = (spec.caps.as_ref())
+            .map(|caps| caps.table("caps"))
+            .transpose()
+            .map_err(js)?;
 
         let mut layer_names: Vec<String> = (spec.base.iter())
             .filter(|base| base.is_rules())
@@ -129,6 +135,9 @@ impl Model {
             Box::new(JsSolver::new(solve)),
             Box::new(NoStore),
         );
+        if let Some((caps, _)) = caps {
+            polu = polu.with_source_caps(caps);
+        }
         polu.load_data().map_err(js)?;
         Ok(Self { polu, layer_names })
     }
@@ -141,6 +150,15 @@ impl Model {
     #[wasm_bindgen(unchecked_return_type = "TableView")]
     pub fn sinks(&self) -> Result<JsValue, JsError> {
         to_js(&TableView::new(self.tables().1))
+    }
+
+    /// The source cap table, or `undefined` without one.
+    #[wasm_bindgen(unchecked_return_type = "TableView | undefined")]
+    pub fn caps(&self) -> Result<JsValue, JsError> {
+        match self.polu.source_caps() {
+            Some(caps) => to_js(&TableView::new(caps)),
+            None => Ok(JsValue::UNDEFINED),
+        }
     }
 
     /// Every usable source/sink pair and its resolved cost.

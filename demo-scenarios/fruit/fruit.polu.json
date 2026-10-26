@@ -3,6 +3,10 @@
     "path": "sources.csv",
     "quantity": "capacity"
   },
+  "caps": {
+    "path": "caps.csv",
+    "quantity": "cap"
+  },
   "sinks": {
     "path": "sinks.csv",
     "quantity": "demand"
