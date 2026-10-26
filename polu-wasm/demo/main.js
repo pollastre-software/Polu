@@ -1,7 +1,7 @@
 // Plain ES modules, no bundler. build.sh puts polu-wasm in ./pkg, highs-js in ./vendor and the
 // demo-scenarios in ./scenarios; serve its output over HTTP (browsers don't load .wasm from file://).
-import init, { Model, columnNames, sheetNames } from "./pkg/polu_wasm.js";
-import highsLoader from "./vendor/highs.mjs";
+// Loading and solving run in worker.js; the page itself only reads column and sheet names.
+import init, { columnNames, sheetNames } from "./pkg/polu_wasm.js";
 
 const OPS = ["set", "scale", "add", "block"];
 const MATRIX_LIMIT = 60; // rows and columns drawn in the cost map
@@ -11,10 +11,14 @@ const $ = (id) => document.getElementById(id);
 
 /** Inputs as Model wants them: `{ name, format?, text | bytes, sheet?, quantity | op }`. */
 let spec = null;
-let model = null;
-let highs = null;
+/** The last solve's snapshot from the worker (see `view` in worker.js), or null. */
+let view = null;
+/** While a solve runs: `{ started, stage, routes?, line? }`. */
+let solving = null;
+let log = []; // HiGHS's log of the last solve
 let tab = "flows";
 let selected = null; // [source, sink] being traced
+let trace = null; // the selected pair's trace
 
 // ---- elements
 
@@ -28,6 +32,8 @@ function h(tag, attrs = {}, ...children) {
   el.append(...children.flat().filter((c) => c != null && c !== false));
   return el;
 }
+
+const duration = (ms) => (ms < 1000 ? `${ms.toFixed(0)} ms` : `${(ms / 1000).toFixed(1)} s`);
 
 const fmt = (n) =>
   n == null || Number.isNaN(n) ? "–" : Number.isInteger(n) ? n.toLocaleString() : n.toFixed(2);
@@ -311,6 +317,44 @@ function renderCards() {
   $("cards").replaceChildren(...cards);
 }
 
+// ---- the worker
+
+/** Thrown at calls a cancel cut short. */
+class Cancelled extends Error {}
+
+let worker = null;
+const calls = new Map(); // id -> { resolve, reject, onReply }
+let nextId = 0;
+
+/** Calls `name` in worker.js; `onReply` gets the call's progress and log messages. */
+function call(name, args, onReply) {
+  if (!worker) {
+    worker = new Worker("./worker.js", { type: "module" });
+    worker.onmessage = ({ data }) => {
+      const pending = calls.get(data.id);
+      if (!pending) return;
+      if ("result" in data || "error" in data) calls.delete(data.id);
+      if ("result" in data) pending.resolve(data.result);
+      else if ("error" in data) pending.reject(new Error(data.error));
+      else pending.onReply?.(data);
+    };
+    worker.onerror = (e) => stopWorker(new Error(e.message || "the solver stopped"));
+  }
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    calls.set(id, { resolve, reject, onReply });
+    worker.postMessage({ id, call: name, args });
+  });
+}
+
+/** Ends the worker and whatever it's doing; its calls fail with `reason`. The next call starts a new one. */
+function stopWorker(reason) {
+  worker?.terminate();
+  worker = null;
+  for (const pending of calls.values()) pending.reject(reason);
+  calls.clear();
+}
+
 // ---- solving
 
 let timer = null;
@@ -320,33 +364,87 @@ function changed(now = false) {
   timer = setTimeout(solve, now ? 0 : 350);
 }
 
-function solve() {
-  if (!highs || !spec) return;
+let runs = 0; // which solve is the latest
+async function solve() {
+  if (!spec) return;
+  // a solve can't be interrupted, so new inputs start over in a new worker
+  if (solving) stopWorker(new Cancelled());
+  const run = ++runs;
   $("error").hidden = true;
-  const t0 = performance.now();
+  solving = { started: performance.now(), stage: "loading" };
+  log = [];
+  const ticker = setInterval(showProgress, 200);
+  showProgress();
+  renderPanel();
   try {
-    model?.free();
-    model = null;
     // an empty base card means no base
     const inputs = { ...spec, base: spec.base?.text === "" ? null : spec.base };
-    model = new Model(inputs, (lp) => highs.solve(lp, { output_flag: false }));
-    const t1 = performance.now();
-    const solution = model.solve();
-    const t2 = performance.now();
-    const routes = model.routes().length;
-    $("status").textContent = `Loaded in ${(t1 - t0).toFixed(0)} ms, solved in ${(t2 - t1).toFixed(0)} ms`;
-    renderSummary(solution, routes);
+    const result = await call("solve", [inputs, MATRIX_LIMIT], (reply) => {
+      if (reply.progress) Object.assign(solving, reply.progress);
+      if (reply.log) log.push((solving.line = reply.log));
+    });
+    if (run !== runs) return;
+    view = result.view;
+    const { load, solve: solved } = result.timings;
+    $("status").textContent = result.error
+      ? "Loaded, but not solved"
+      : `Loaded in ${duration(load)}, solved in ${duration(solved)}`;
+    if (result.error) showError(result.error);
   } catch (e) {
-    $("error").textContent = e.message ?? String(e);
-    $("error").hidden = false;
-    $("status").textContent = model ? "Loaded, but not solved" : "Not loaded";
-    $("summary").replaceChildren();
+    if (run !== runs) return;
+    view = null;
+    showError(e.message);
+    $("status").textContent = "Not loaded";
+  } finally {
+    clearInterval(ticker);
+    if (run === runs) {
+      solving = null;
+      showProgress();
+      renderSummary();
+      renderPanel();
+      loadTrace();
+    }
   }
+}
+
+function cancel() {
+  if (!solving) return;
+  runs++;
+  solving = null;
+  // the worker's model went with it
+  view = null;
+  stopWorker(new Cancelled());
+  $("status").textContent = "Cancelled";
+  showProgress();
+  renderSummary();
   renderPanel();
 }
 
-function renderSummary(solution, routes) {
-  const [sources, sinks] = [model.sources(), model.sinks()];
+const STAGES = {
+  loading: () => "Loading the inputs",
+  solving: (s) => `Solving ${s.routes == null ? "" : `${fmt(s.routes)} routes `}with HiGHS`,
+  reading: () => "Reading the solution",
+};
+
+function showProgress() {
+  $("cancel").hidden = !solving;
+  $("busy").hidden = !solving;
+  $("results").classList.toggle("solving", !!solving);
+  if (!solving) return;
+  const seconds = (performance.now() - solving.started) / 1000;
+  $("status").textContent = `${STAGES[solving.stage](solving)}… ${seconds.toFixed(1)} s`;
+  $("last-log").textContent = solving.line ?? "";
+  if (tab === "log") $("log").textContent = log.join("\n");
+}
+
+function showError(message) {
+  $("error").textContent = message;
+  $("error").hidden = false;
+}
+
+function renderSummary() {
+  if (!view?.solution) return $("summary").replaceChildren();
+  const { solution, sources, sinks, routes } = view;
   const units = solution.flows.reduce((a, f) => a + f.units, 0);
   const stat = (label, value) => h("div", { class: "stat" }, h("span", {}, label), h("strong", {}, value));
   $("summary").replaceChildren(
@@ -359,30 +457,43 @@ function renderSummary(solution, routes) {
 
 // ---- result panels
 
+let panels = 0; // which panel render is the latest, for the LP text that arrives later
 function renderPanel() {
+  const shown = ++panels;
   for (const b of document.querySelectorAll("[role=tab]")) b.setAttribute("aria-selected", b.dataset.tab === tab);
   const panel = $("panel");
-  const solution = model?.solution();
-  if (!model) {
+  if (tab === "log") {
+    panel.replaceChildren(
+      h("p", { class: "muted" }, "What HiGHS printed during the last solve."),
+      h("pre", { class: "lp", id: "log" }, log.join("\n") || "Nothing yet."),
+    );
+    return renderTrace();
+  }
+  if (!view) {
     panel.replaceChildren();
     return renderTrace();
   }
+  const solution = view.solution;
   if (tab === "flows") panel.replaceChildren(flowsTable(solution));
   if (tab === "costmap") panel.replaceChildren(costMatrix(solution));
   if (tab === "unused") panel.replaceChildren(solution ? unusedTable() : h("p", { class: "muted" }, "Solve first."));
   if (tab === "lp") {
-    const lp = model.lp();
-    panel.replaceChildren(
-      h("p", { class: "muted" }, "The CPLEX LP text handed to HiGHS: column xi is route i, rows si and dj are the supply and demand limits."),
-      h("pre", { class: "lp" }, lp.length > LP_LIMIT ? lp.slice(0, LP_LIMIT) + "\n…" : lp),
-    );
+    const about = h("p", { class: "muted" }, "The CPLEX LP text handed to HiGHS: column xi is route i, rows si, ci and dj are the supply, cap and demand limits.");
+    const text = h("pre", { class: "lp" }, solving ? "Waiting for the solve…" : "Writing the LP…");
+    panel.replaceChildren(about, text);
+    if (!solving) {
+      call("lp", [LP_LIMIT]).then(
+        (lp) => shown === panels && (text.textContent = lp.length > LP_LIMIT ? lp.text + "\n…" : lp.text),
+        (e) => shown === panels && !(e instanceof Cancelled) && (text.textContent = e.message),
+      );
+    }
   }
   renderTrace();
 }
 
 function flowsTable(solution) {
   if (!solution) return h("p", { class: "muted" }, "Solve first.");
-  const [sources, sinks] = [model.sources(), model.sinks()];
+  const { sources, sinks } = view;
   const rows = [...solution.flows].sort((a, b) => b.units * b.cost - a.units * a.cost);
   return h("table", {},
     h("thead", {}, h("tr", {}, ["Source", "Sink", "Units", "Unit cost", "Cost"].map((t) => h("th", {}, t)))),
@@ -396,17 +507,16 @@ function flowsTable(solution) {
 }
 
 function costMatrix(solution) {
-  const [sources, sinks] = [model.sources(), model.sinks()];
-  const cost = new Map(model.routes().map((r) => [`${r.source},${r.sink}`, r.cost]));
+  const { sources, sinks, costs } = view;
   const units = new Map((solution?.flows ?? []).map((f) => [`${f.source},${f.sink}`, f.units]));
-  const ns = Math.min(sources.rows.length, MATRIX_LIMIT);
-  const nk = Math.min(sinks.rows.length, MATRIX_LIMIT);
+  const ns = costs.length;
+  const nk = costs[0]?.length ?? 0;
   const note = ns < sources.rows.length || nk < sinks.rows.length
     ? h("p", { class: "muted" }, `Showing the first ${ns} sources and ${nk} sinks.`) : null;
   const head = h("tr", {}, h("th", {}), sinks.rows.slice(0, nk).map((k) => h("th", { class: "vertical" }, h("span", {}, k.label))));
   const body = sources.rows.slice(0, ns).map((s, i) =>
     h("tr", {}, h("th", {}, s.label), Array.from({ length: nk }, (_, j) => {
-      const c = cost.get(`${i},${j}`);
+      const c = costs[i][j];
       const u = units.get(`${i},${j}`);
       const cls = ["cell", c == null ? "none" : "", u ? "used" : "", isSelected(i, j) ? "selected" : ""].join(" ");
       return h("td", { class: cls, title: u ? `${fmt(u)} units at ${fmt(c)}` : c == null ? "no route" : `cost ${fmt(c)}`, onclick: () => select(i, j) },
@@ -419,8 +529,7 @@ function costMatrix(solution) {
 }
 
 function unusedTable() {
-  const sources = model.sources();
-  const slack = model.slack();
+  const { sources, slack } = view;
   return h("div", {},
     h("p", { class: "muted" }, "A row with an empty field caps the rows under it, so a site can have room of its own (unused) yet none to spare once its business total is reached."),
     h("table", {},
@@ -442,17 +551,33 @@ const isSelected = (s, k) => selected && selected[0] === s && selected[1] === k;
 function select(s, k) {
   selected = isSelected(s, k) ? null : [s, k];
   renderPanel();
+  loadTrace();
+}
+
+/** Asks the worker for the selected pair's trace, and draws it. */
+async function loadTrace() {
+  trace = null;
+  renderTrace();
+  const pair = selected;
+  if (!view || !pair) return;
+  try {
+    const result = await call("trace", pair);
+    if (selected !== pair || solving) return;
+    trace = result;
+  } catch {
+    // the pair isn't in the new inputs, or the worker was stopped
+    if (selected === pair) selected = null;
+  }
+  renderTrace();
 }
 
 function renderTrace() {
   const el = $("trace");
-  if (!model || !selected) return (el.hidden = true);
+  if (!view || !selected || !trace) return (el.hidden = true);
   const [s, k] = selected;
-  const trace = model.trace(s, k);
-  const layers = model.layers();
   const say = { set: "sets", scale: "scales by", add: "adds", block: "blocks" };
   const steps = trace.steps.map((step) => {
-    const layer = layers[step.layer];
+    const layer = view.layers[step.layer];
     const rule = step.rule == null ? null : layer.rules[step.rule];
     const what = rule == null
       ? "no rule matches, unchanged"
@@ -463,7 +588,7 @@ function renderTrace() {
   });
   const base = trace.base == null ? "no base cost" : `base cost ${fmt(trace.base)}`;
   el.replaceChildren(
-    h("h3", {}, `${model.sources().rows[s].label} → ${model.sinks().rows[k].label}`),
+    h("h3", {}, `${view.sources.rows[s].label} → ${view.sinks.rows[k].label}`),
     h("ol", {}, h("li", {}, h("span", { class: "op" }, "base"), ` ${base}`), steps),
     h("p", {}, trace.cost == null ? "Result: no route, this pair can't be used." : `Result: cost ${fmt(trace.cost)} per unit.`),
   );
@@ -472,9 +597,14 @@ function renderTrace() {
 
 // ---- downloads
 
-function download(what, format) {
-  if (!model?.solution()) return;
-  const bytes = what === "flows" ? model.exportFlows(format) : model.exportSlack(format);
+async function download(what, format) {
+  if (!view?.solution || solving) return;
+  let bytes;
+  try {
+    bytes = await call("export", [what, format]);
+  } catch (e) {
+    return e instanceof Cancelled || showError(e.message);
+  }
   const types = { csv: "text/csv", json: "application/json", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" };
   const url = URL.createObjectURL(new Blob([bytes], { type: types[format] }));
   h("a", { href: url, download: `${what === "flows" ? "flows" : "unused"}.${format}` }).click();
@@ -510,6 +640,7 @@ $("add-layer").onclick = () => {
   renderCards();
 };
 $("solve").onclick = solve;
+$("cancel").onclick = cancel;
 for (const b of document.querySelectorAll("[role=tab]")) b.onclick = () => { tab = b.dataset.tab; renderPanel(); };
 for (const b of document.querySelectorAll("[data-export]")) b.onclick = () => download(b.dataset.export, b.dataset.format);
 
@@ -526,13 +657,11 @@ document.addEventListener("drop", async (e) => {
     renderCards();
     changed(true);
   } catch (err) {
-    $("error").textContent = err.message;
-    $("error").hidden = false;
+    showError(err.message);
   }
 });
 
 await init();
-highs = await highsLoader({ locateFile: (file) => `./vendor/${file}` });
 $("status").textContent = "Ready";
 try {
   const options = (await scenarios()).map((s) => h("option", { value: s.scenario }, s.name));

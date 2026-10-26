@@ -20,7 +20,7 @@ cd "$root"
 
 # the page
 rm -rf "$out/scenarios" "$out/pkg" "$out/vendor"
-cp polu-wasm/demo/index.html polu-wasm/demo/main.js polu-wasm/demo/style.css "$out/"
+cp polu-wasm/demo/index.html polu-wasm/demo/main.js polu-wasm/demo/worker.js polu-wasm/demo/style.css "$out/"
 
 # polu-wasm
 wasm-pack build polu-wasm --target web --release --out-dir "$out/pkg"

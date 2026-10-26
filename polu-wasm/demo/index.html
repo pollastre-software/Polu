@@ -28,8 +28,8 @@
             </select>
           </label>
           <span id="generator" hidden>
-            <label>Sources <input id="gen-sources" type="number" min="2" max="400" value="40" /></label>
-            <label>Sinks <input id="gen-sinks" type="number" min="2" max="400" value="60" /></label>
+            <label>Sources <input id="gen-sources" type="number" min="2" max="1000" value="40" /></label>
+            <label>Sinks <input id="gen-sinks" type="number" min="2" max="1000" value="60" /></label>
             <button id="generate" type="button">Generate</button>
           </span>
         </div>
@@ -46,6 +46,11 @@
           <button id="solve" type="button">Solve</button>
           <label class="check"><input id="auto" type="checkbox" checked /> Solve on every edit</label>
           <span id="status" class="muted">Loading WebAssembly…</span>
+          <button id="cancel" type="button" class="ghost small" hidden>Cancel</button>
+        </div>
+        <div id="busy" class="busy" hidden>
+          <div class="bar"></div>
+          <code id="last-log"></code>
         </div>
         <div id="error" class="error" hidden></div>
         <div id="summary" class="summary"></div>
@@ -54,6 +59,7 @@
           <button role="tab" data-tab="costmap">Cost map</button>
           <button role="tab" data-tab="unused">Unused capacity</button>
           <button role="tab" data-tab="lp">LP</button>
+          <button role="tab" data-tab="log">Solver log</button>
         </nav>
         <div id="panel"></div>
         <div id="trace" class="trace" hidden></div>

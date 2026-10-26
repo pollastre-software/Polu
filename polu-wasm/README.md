@@ -83,8 +83,12 @@ The solve callback can be any solver that returns highs-js's result shape,
 
 ## Notes
 
-- `highs.solve` runs on the main thread and blocks it while solving. That is fine for demo sizes
-  (a 150 x 200 generated network solves in about 1.5 s); a Web Worker is the next step for big ones.
+- The demo loads and solves in a Web Worker (`demo/worker.js`), so the page stays responsive,
+  shows HiGHS's log as it goes (the Solver log tab) and can cancel a solve by ending the worker.
+  The page itself only loads polu-wasm for column and sheet names.
+- HiGHS's MIP presolve finds nothing to remove in these transport problems but takes most of the
+  time, so the demo turns it off (`presolve: "off"`). A generated 700 x 600 network (420k routes)
+  then solves in about 17 s instead of 57 s; reading the 27 MB LP text takes about 5 s of that.
 - The `.wasm` is about 2.4 MB before `wasm-opt` (wasm-pack runs it on release builds), 0.85 MB
   gzipped. highs.wasm adds 3.5 MB (1.2 MB gzipped).
 - The page follows the system light/dark setting (dark is Catppuccin Mocha); the header button

@@ -433,6 +433,44 @@ td.bar span {
   overflow: auto;
 }
 
+/* while a solve runs: a sliding bar, HiGHS's latest log line, and the last results dimmed */
+.busy {
+  margin-bottom: 12px;
+}
+
+.busy .bar {
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent) 0 0 / 40% 100% no-repeat var(--line);
+  animation: slide 1.2s linear infinite;
+}
+
+@keyframes slide {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}
+
+.busy code {
+  display: block;
+  margin-top: 6px;
+  min-height: 1.5em;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
+.solving #summary,
+.solving #panel:not(:has(#log)),
+.solving #trace {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 .downloads {
   display: flex;
   flex-wrap: wrap;
