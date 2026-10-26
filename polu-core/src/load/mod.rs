@@ -12,6 +12,14 @@
 //! | apple inc |       | 5        |
 //! | apple inc | large | 3        |
 //!
+//! Source caps: read like sources, with any of the source columns plus one quantity column. Each row caps
+//! the total out of the source rows that have every value it sets, and gets no routes of its own, so a
+//! business total doesn't need a business-only source row. Caps that match no source row are ignored.
+//!
+//! | business  | cap |
+//! |-----------|-----|
+//! | apple inc | 5   |
+//!
 //! Costmap layers: `source.<column>` and `sink.<column>` (names from the source and sink headers;
 //! leave a column out, or a cell empty, to match any value), an optional `priority` (default 0)
 //! and `value` (cost, factor or amount; not needed for `Block` layers).

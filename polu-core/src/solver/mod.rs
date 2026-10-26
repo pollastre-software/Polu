@@ -7,7 +7,8 @@ use crate::core::traits::Solver;
 use crate::core::types::{Assignment, Limit, Problem};
 
 /// Solves the transport problem as a MIP: one integer column per route, one `<=` row per supply limit
-/// and one `==` row per demand limit. A route counts towards every limit containing its source or sink.
+/// and cap, and one `==` row per demand limit. A route counts towards every limit containing its source
+/// or sink.
 #[derive(Debug, Clone, Default)]
 pub struct HighsSolver {
     /// Print HiGHS's own log to stdout.
@@ -28,9 +29,11 @@ impl Solver for HighsSolver {
         }
 
         let mut pb = ColProblem::default();
+        // caps are supply limits too, just not one per source row
         let supply: Vec<_> = problem
             .supply
             .iter()
+            .chain(&problem.caps)
             .map(|l| pb.add_row(..=l.amount as f64))
             .collect();
         let demand: Vec<_> = problem
@@ -39,8 +42,12 @@ impl Solver for HighsSolver {
             .map(|l| pb.add_row(l.amount as f64..=l.amount as f64))
             .collect();
         let (in_supply, in_demand) = (
-            rows_per_member(&problem.supply, &supply),
-            rows_per_member(&problem.demand, &demand),
+            rows_per_member(
+                problem.supply.iter().chain(&problem.caps),
+                problem.supply.len(),
+                &supply,
+            ),
+            rows_per_member(&problem.demand, problem.demand.len(), &demand),
         );
         for route in &problem.routes {
             let factors = in_supply[route.source]
@@ -71,10 +78,14 @@ impl Solver for HighsSolver {
     }
 }
 
-/// For each table row, the HiGHS rows of the limits it belongs to.
-fn rows_per_member(limits: &[Limit], rows: &[Row]) -> Vec<Vec<Row>> {
-    let mut members = vec![Vec::new(); limits.len()];
-    for (limit, &row) in limits.iter().zip(rows) {
+/// For each of a table's `table_rows` rows, the HiGHS rows of the limits it belongs to.
+fn rows_per_member<'a>(
+    limits: impl IntoIterator<Item = &'a Limit>,
+    table_rows: usize,
+    rows: &[Row],
+) -> Vec<Vec<Row>> {
+    let mut members = vec![Vec::new(); table_rows];
+    for (limit, &row) in limits.into_iter().zip(rows) {
         for &member in &limit.rows {
             members[member].push(row);
         }

@@ -113,9 +113,11 @@ pub struct Polu {
     source_loader: Box<dyn Load<SourceList>>,
     sink_loader: Box<dyn Load<SinkList>>,
     costmap_loader: Box<dyn Load<CostMap>>,
+    caps_loader: Option<Box<dyn Load<Table>>>,
     solver: Box<dyn Solver>,
     storer: Box<dyn Store>,
     inputs: Option<(SourceList, SinkList, CostMap)>,
+    caps: Option<Table>,
     problem: Option<Problem>,
     solution: Option<Assignment>,
 }
@@ -132,12 +134,21 @@ impl Polu {
             source_loader,
             sink_loader,
             costmap_loader,
+            caps_loader: None,
             solver,
             storer,
             inputs: None,
+            caps: None,
             problem: None,
             solution: None,
         }
+    }
+
+    /// Adds a source cap table: each of its rows caps the total flow out of the source rows it matches,
+    /// with no routes of its own (see [`Table::caps`]).
+    pub fn with_source_caps(mut self, caps_loader: Box<dyn Load<Table>>) -> Self {
+        self.caps_loader = Some(caps_loader);
+        self
     }
 
     /// Call each adapter to load the data and transform into the problem statement data type (MIP)
@@ -146,11 +157,18 @@ impl Polu {
         let sources = self.source_loader.load().map_err(PoluError::Load)?;
         let sinks = self.sink_loader.load().map_err(PoluError::Load)?;
         let costmap = self.costmap_loader.load().map_err(PoluError::Load)?;
+        let caps = (self.caps_loader.as_ref())
+            .map(|loader| loader.load().map_err(PoluError::Load))
+            .transpose()?;
 
         self.solution = None;
-        let problem = formulate(&sources, &sinks, &costmap)?;
+        let mut problem = formulate(&sources, &sinks, &costmap)?;
+        if let Some(caps) = &caps {
+            problem.caps = sources.caps(caps)?;
+        }
         // kept so stores can label the flows and views can inspect them
         self.inputs = Some((sources, sinks, costmap));
+        self.caps = caps;
         Ok(self.problem.insert(problem))
     }
 
@@ -188,6 +206,11 @@ impl Polu {
     /// The costmap from the last `load_data()`, e.g. to [`CostMap::trace`] a pair.
     pub fn costmap(&self) -> Option<&CostMap> {
         self.inputs.as_ref().map(|(_, _, costmap)| costmap)
+    }
+
+    /// The source cap table from the last `load_data()`, if one was added with `with_source_caps`.
+    pub fn source_caps(&self) -> Option<&Table> {
+        self.caps.as_ref()
     }
 
     pub fn problem(&self) -> Option<&Problem> {
@@ -951,6 +974,72 @@ mod tests {
         // N ships 4 of 10, S ships 6 of 5 (FirstRoute ignores supply)
         let unused: Vec<i64> = polu.slack().unwrap().iter().map(Slack::unused).collect();
         assert_eq!(unused, [6, -1]);
+    }
+
+    /// The business total from a cap table instead of a source row: apple inc ships at most 5 in total,
+    /// and nothing ships from apple inc without a size, because no such row exists.
+    #[cfg(feature = "highs")]
+    #[test]
+    fn source_caps_bound_rows_without_routes() {
+        use crate::solver::HighsSolver;
+
+        let sources = Table::new(
+            header(&["region", "site"]),
+            vec![
+                (key(&["apple inc", "large"]), 3),
+                (key(&["apple inc", "small"]), 7),
+                (key(&["bananas and more"]), 20),
+            ],
+        )
+        .unwrap();
+        let sinks = Table::new(
+            header(&["region", "store"]),
+            vec![(key(&["ohio fruits"]), 9)],
+        )
+        .unwrap();
+        let cm = costmap(vec![
+            rule(&["apple inc", "large"], &["*"], 0, 1.0),
+            rule(&["apple inc", "small"], &["*"], 0, 2.0),
+            rule(&["bananas and more"], &["*"], 0, 10.0),
+        ]);
+        let caps = Table::new(
+            header(&["region"]),
+            vec![(key(&["apple inc"]), 5), (key(&["cherries"]), 1)],
+        )
+        .unwrap();
+        let mut polu = Polu::new(
+            Box::new(Fixed(sources)),
+            Box::new(Fixed(sinks)),
+            Box::new(Fixed(cm)),
+            Box::new(HighsSolver::default()),
+            Box::new(Capture(Rc::default())),
+        )
+        .with_source_caps(Box::new(Fixed(caps)));
+
+        let problem = polu.load_data().unwrap();
+        // one route per source row, the cap adds none; the cherries cap matches nothing and is left out
+        assert_eq!(problem.routes.len(), 3);
+        assert_eq!(
+            problem.caps,
+            [Limit {
+                rows: vec![0, 1],
+                amount: 5
+            }]
+        );
+        assert_eq!(polu.source_caps().unwrap().rows().len(), 2);
+
+        // apple inc rows are cheaper but capped at 5 together, bananas and more covers the other 4
+        let flows = polu.run().unwrap().flows.clone();
+        let shipped = |rows: &[usize]| -> i64 {
+            (flows.iter())
+                .filter(|f| rows.contains(&f.source))
+                .map(|f| f.units)
+                .sum()
+        };
+        assert_eq!((shipped(&[0, 1]), shipped(&[2])), (5, 4));
+        // the cap is full, so neither apple inc row has spare capacity left
+        let spare: Vec<i64> = polu.slack().unwrap().iter().map(|s| s.spare).collect();
+        assert_eq!(spare, [0, 0, 16]);
     }
 
     #[test]
