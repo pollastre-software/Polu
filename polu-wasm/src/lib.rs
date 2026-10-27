@@ -36,6 +36,8 @@ export interface PoluInput {
   bytes?: Uint8Array;
   /** Excel sheet, the first one by default. */
   sheet?: string;
+  /** A named Excel table (.xlsx only), read instead of `sheet`. */
+  table?: string;
   /** Sources, sinks and caps: the quantity column. */
   quantity?: string;
   /** Layers: what the layer does. */
@@ -77,6 +79,14 @@ export interface SolutionView {
   flows: { source: number; sink: number; units: number; cost: number }[];
 }
 export interface SlackView { used: number; amount: number; unused: number; spare: number }
+/** A sheet or named table of a workbook; `sheet` is the sheet it's on (its own name for a sheet). */
+export interface RegionView {
+  kind: "sheet" | "table";
+  name: string;
+  sheet: string;
+  /** The header row, empty for an empty sheet. */
+  columns: string[];
+}
 "#;
 
 #[wasm_bindgen(start)]
@@ -354,10 +364,28 @@ pub fn column_names(
     input.column_names().map_err(js)
 }
 
-/// The sheet names of an Excel workbook, in workbook order.
-#[wasm_bindgen(js_name = sheetNames)]
-pub fn sheet_names(workbook: &[u8]) -> Result<Vec<String>, JsError> {
-    polu_core::load::xlsx::sheet_names(workbook).map_err(js)
+/// Every sheet of an Excel workbook in order, each followed by the named tables on it, with their
+/// columns, so the page can offer them. Pass one on as an input's `sheet` or `table`.
+#[wasm_bindgen(unchecked_return_type = "RegionView[]")]
+pub fn regions(workbook: &[u8]) -> Result<JsValue, JsError> {
+    use polu_core::load::xlsx::{self, Region};
+    let regions: Vec<RegionView> = xlsx::regions(workbook)
+        .map_err(js)?
+        .into_iter()
+        .map(|info| {
+            let (kind, name) = match info.region {
+                Region::Sheet(name) => ("sheet", name),
+                Region::Table(name) => ("table", name),
+            };
+            RegionView {
+                kind,
+                name,
+                sheet: info.sheet,
+                columns: info.columns,
+            }
+        })
+        .collect();
+    to_js(&regions)
 }
 
 /// Results are handed back with `exportFlows`/`exportSlack` instead of written by a store.
@@ -468,6 +496,14 @@ struct SlackView {
     amount: i64,
     unused: i64,
     spare: i64,
+}
+
+#[derive(Serialize)]
+struct RegionView {
+    kind: &'static str,
+    name: String,
+    sheet: String,
+    columns: Vec<String>,
 }
 
 fn to_js(value: &impl Serialize) -> Result<JsValue, JsError> {

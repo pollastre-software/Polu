@@ -52,7 +52,7 @@ Any other static host works the same way: copy `target/demo-site/` and serve `.w
 ## Using it from JS
 
 ```js
-import init, { Model, columnNames, sheetNames } from "./pkg/polu_wasm.js"; // paths as build.sh lays them out
+import init, { Model, columnNames, regions } from "./pkg/polu_wasm.js"; // paths as build.sh lays them out
 import highsLoader from "./vendor/highs.mjs";
 
 await init();
@@ -63,8 +63,11 @@ const model = new Model(
     sources: { name: "sources.csv", text: sourcesCsv, quantity: "capacity" },
     caps: { name: "caps.csv", text: "business,cap\napple inc,5", quantity: "cap" }, // optional
     sinks: { name: "sinks.csv", text: sinksCsv, quantity: "demand" },
-    base: { name: "base.xlsx", bytes: workbookBytes, sheet: "base" }, // optional
-    layers: [{ name: "costs-set.csv", text: setCsv, op: "set" }],
+    base: { name: "costs.xlsx", bytes: workbookBytes, sheet: "base" }, // optional
+    layers: [
+      { name: "costs-set.csv", text: setCsv, op: "set" },
+      { name: "costs.xlsx", bytes: workbookBytes, table: "Surcharges", op: "add" }, // a named table
+    ],
   },
   (lp) => highs.solve(lp, { output_flag: false }),
 );
@@ -76,7 +79,9 @@ model.free(); // release the Rust side when done
 ```
 
 The inputs take the same file layouts as the CLI and TUI (see `polu_core::load`); `format` comes
-from the name's extension unless given. The TypeScript types are in `pkg/polu_wasm.d.ts`.
+from the name's extension unless given. An Excel input reads its `table` (a named table, .xlsx only) or its
+`sheet`, or else the first sheet; `regions(bytes)` lists a workbook's sheets and tables with their
+columns. The TypeScript types are in `pkg/polu_wasm.d.ts`.
 
 The solve callback can be any solver that returns highs-js's result shape,
 `{ Status: "Optimal", Columns: { x0: { Primal: 3 }, ... } }`, where column `xi` is route `i`.
@@ -85,7 +90,7 @@ The solve callback can be any solver that returns highs-js's result shape,
 
 - The demo loads and solves in a Web Worker (`demo/worker.js`), so the page stays responsive,
   shows HiGHS's log as it goes (the Solver log tab) and can cancel a solve by ending the worker.
-  The page itself only loads polu-wasm for column and sheet names.
+  The page itself only loads polu-wasm for column names and a workbook's sheets and tables.
 - HiGHS's MIP presolve finds nothing to remove in these transport problems but takes most of the
   time, so the demo turns it off (`presolve: "off"`). A generated 700 x 600 network (420k routes)
   then solves in about 17 s instead of 57 s; reading the 27 MB LP text takes about 5 s of that.

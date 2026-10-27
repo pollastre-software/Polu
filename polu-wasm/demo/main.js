@@ -1,7 +1,8 @@
 // Plain ES modules, no bundler. build.sh puts polu-wasm in ./pkg, highs-js in ./vendor and the
 // demo-scenarios in ./scenarios; serve its output over HTTP (browsers don't load .wasm from file://).
-// Loading and solving run in worker.js; the page itself only reads column and sheet names.
-import init, { columnNames, sheetNames } from "./pkg/polu_wasm.js";
+// Loading and solving run in worker.js; the page itself only reads column names and a workbook's
+// sheets and tables.
+import init, { columnNames, regions } from "./pkg/polu_wasm.js";
 
 const OPS = ["set", "scale", "add", "block"];
 const MATRIX_LIMIT = 60; // rows and columns drawn in the cost map
@@ -9,7 +10,7 @@ const LP_LIMIT = 200_000; // characters of LP text shown
 
 const $ = (id) => document.getElementById(id);
 
-/** Inputs as Model wants them: `{ name, format?, text | bytes, sheet?, quantity | op }`. */
+/** Inputs as Model wants them: `{ name, format?, text | bytes, sheet? | table?, quantity | op }`. */
 let spec = null;
 /** The last solve's snapshot from the worker (see `view` in worker.js), or null. */
 let view = null;
@@ -58,12 +59,12 @@ async function scenarios() {
 async function loadScenario(path) {
   const dir = new URL(path, new URL("./scenarios/", location.href));
   const scenario = await (await fetchOk(dir)).json();
-  const file = async ({ path, sheet }) => {
+  const file = async ({ path, sheet, table }) => {
     const response = await fetchOk(new URL(path, dir));
     const name = path.split("/").pop();
     return /\.(csv|json)$/i.test(name)
       ? { name, text: await response.text() }
-      : { name, sheet, bytes: new Uint8Array(await response.arrayBuffer()) };
+      : { name, sheet, table, bytes: new Uint8Array(await response.arrayBuffer()) };
   };
   const table = async (input) => input && { ...(await file(input)), quantity: input.quantity };
   return {
@@ -75,25 +76,40 @@ async function loadScenario(path) {
   };
 }
 
-/** Maps a workbook's sheets onto inputs by name: sources, caps, sinks, base, costs-<op>. */
+/** The input fields that read `region`, one of `regions(bytes)`. */
+const readFrom = (region) =>
+  region.kind === "table" ? { sheet: undefined, table: region.name } : { sheet: region.name, table: undefined };
+
+/**
+ * Maps a workbook's sheets and named tables onto inputs by name, ignoring case: sources, caps,
+ * sinks, base and costs-<op> (or costs_<op>, as table names can't have hyphens). A table wins over
+ * a sheet of the same name.
+ */
 function fromWorkbook(name, bytes) {
-  const sheets = sheetNames(bytes);
-  const sheet = (s, extra) => ({ name, bytes, sheet: s, ...extra });
-  const quantity = (s) => {
-    const columns = columnNames(sheet(s));
-    return columns[columns.length - 1];
+  const found = regions(bytes);
+  const key = (r) => r.name.toLowerCase().replace("_", "-");
+  const named = (n) => {
+    const all = found.filter((r) => key(r) === n);
+    return all.find((r) => r.kind === "table") ?? all[0];
   };
-  if (!sheets.includes("sources") || !sheets.includes("sinks")) {
-    throw new Error(`${name} needs sheets named "sources" and "sinks" (it has ${sheets.join(", ")})`);
+  const input = (r, extra) => r && { name, bytes, ...readFrom(r), ...extra };
+  const table = (n) => {
+    const r = named(n);
+    return input(r, { quantity: r?.columns[r.columns.length - 1] }) ?? null;
+  };
+  const [sources, sinks] = [table("sources"), table("sinks")];
+  if (!sources || !sinks) {
+    const names = found.map((r) => r.name).join(", ");
+    throw new Error(`${name} needs sheets or tables named "sources" and "sinks" (it has ${names})`);
   }
   return {
-    sources: sheet("sources", { quantity: quantity("sources") }),
-    caps: sheets.includes("caps") ? sheet("caps", { quantity: quantity("caps") }) : null,
-    sinks: sheet("sinks", { quantity: quantity("sinks") }),
-    base: sheets.includes("base") ? sheet("base") : null,
-    layers: sheets
-      .filter((s) => /^costs-/.test(s) && OPS.includes(s.slice(6)))
-      .map((s) => sheet(s, { op: s.slice(6) })),
+    sources,
+    caps: table("caps"),
+    sinks,
+    base: input(named("base")) ?? null,
+    layers: found
+      .filter((r) => /^costs-/.test(key(r)) && OPS.includes(key(r).slice(6)))
+      .map((r) => input(r, { op: key(r).slice(6) })),
   };
 }
 
@@ -216,7 +232,7 @@ function card(title, input, { onReplace, onRemove, extra }) {
           changed();
         },
       }, input.text)
-    : h("div", { class: "workbook" }, sheetPicker(input));
+    : h("div", { class: "workbook" }, regionPicker(input));
   const el = h("article", { class: "card" },
     h("div", { class: "card-head" },
       h("strong", {}, title),
@@ -232,17 +248,57 @@ function card(title, input, { onReplace, onRemove, extra }) {
   return el;
 }
 
-function sheetPicker(input) {
-  let sheets = [];
+/**
+ * A workbook's sheets and named tables as a scrollable list, each with its columns, as in the TUI.
+ * Picking one reads the input from it; an input with neither starts on the first sheet.
+ */
+function regionPicker(input) {
+  let found = [];
   try {
-    sheets = sheetNames(input.bytes);
+    found = regions(input.bytes);
   } catch (e) {
     return h("span", { class: "error-text" }, e.message);
   }
-  input.sheet ??= sheets[0];
-  return h("label", {}, "Sheet ",
-    h("select", { onchange: (e) => { input.sheet = e.target.value; renderCards(); changed(); } },
-      sheets.map((s) => h("option", { value: s, selected: s === input.sheet }, s))));
+  if (!found.length) return h("span", { class: "error-text" }, "The workbook has no sheets");
+  if (input.sheet == null && input.table == null) Object.assign(input, readFrom(found[0]));
+  const isPicked = (r) => (r.kind === "table" ? r.name === input.table : !input.table && r.name === input.sheet);
+  const columns = ({ columns: c }) =>
+    c.length ? `${c.length} column${c.length === 1 ? "" : "s"}: ${c.join(", ")}` : "empty";
+  const list = h("div", {
+    class: "regions",
+    role: "listbox",
+    "aria-label": "Sheet or table",
+    // arrow keys move between entries, Enter or a click picks one
+    onkeydown: (e) => {
+      const next = { ArrowDown: "nextElementSibling", ArrowUp: "previousElementSibling" }[e.key];
+      if (next && e.target[next]) {
+        e.preventDefault();
+        e.target[next].focus();
+      }
+    },
+  }, found.map((r) => h("button", {
+    type: "button",
+    role: "option",
+    class: "region",
+    "aria-selected": String(isPicked(r)),
+    onclick: () => { Object.assign(input, readFrom(r)); renderCards(); changed(); },
+  },
+    h("span", { class: "line" },
+      h("span", { class: "muted kind" }, r.kind),
+      h("strong", {}, r.name),
+      r.kind === "table" && h("span", { class: "muted" }, ` on ${r.sheet}`)),
+    h("span", { class: "line muted columns" }, columns(r)))));
+  // the list is rebuilt on every pick, so bring the picked one back into view once it's on the page
+  requestAnimationFrame(() => {
+    const picked = list.querySelector("[aria-selected=true]");
+    if (picked) list.scrollTop = picked.offsetTop - (list.clientHeight - picked.offsetHeight) / 2;
+  });
+  const at = found.findIndex(isPicked);
+  return [
+    h("div", { class: "muted regions-head" },
+      "Sheet or table", h("span", {}, at < 0 ? `${found.length}` : `${at + 1} of ${found.length}`)),
+    list,
+  ];
 }
 
 function quantityPicker(input) {

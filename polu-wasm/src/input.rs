@@ -20,7 +20,8 @@ pub struct Spec {
 }
 
 /// One file. `format` defaults to the extension of `name`. Sources, sinks and caps need `quantity`,
-/// layers need `op`; Excel files take an optional `sheet` (the first one by default).
+/// layers need `op`; Excel files take an optional `sheet` or named `table` (.xlsx only), and read
+/// the first sheet without either. A `table` wins over a `sheet`.
 #[derive(Debug, Deserialize)]
 pub struct Input {
     #[serde(default)]
@@ -33,6 +34,8 @@ pub struct Input {
     pub bytes: Option<Vec<u8>>,
     #[serde(default)]
     pub sheet: Option<String>,
+    #[serde(default)]
+    pub table: Option<String>,
     #[serde(default)]
     pub quantity: Option<String>,
     #[serde(default)]
@@ -75,16 +78,18 @@ impl Input {
         }
     }
 
-    fn workbook(&self) -> Result<(Arc<[u8]>, String), BoxError> {
+    fn workbook(&self) -> Result<(Arc<[u8]>, xlsx::Region), BoxError> {
         let bytes: Arc<[u8]> = self.bytes.as_deref().ok_or("no `bytes`")?.into();
-        let sheet = match &self.sheet {
-            Some(sheet) => sheet.clone(),
-            None => xlsx::sheet_names(&bytes)?
+        let region = match (&self.table, &self.sheet) {
+            (Some(table), _) => xlsx::Region::Table(table.clone()),
+            (None, Some(sheet)) => xlsx::Region::Sheet(sheet.clone()),
+            (None, None) => xlsx::sheet_names(&bytes)?
                 .into_iter()
                 .next()
-                .ok_or("the workbook has no sheets")?,
+                .ok_or("the workbook has no sheets")?
+                .into(),
         };
-        Ok((bytes, sheet))
+        Ok((bytes, region))
     }
 
     pub fn op(&self) -> Result<Op, BoxError> {
@@ -121,8 +126,8 @@ impl Input {
                 (Box::new(table), header)
             }
             Format::Excel => {
-                let (bytes, sheet) = self.workbook().map_err(at)?;
-                let table = xlsx::XlsxTable::new(bytes, sheet, quantity);
+                let (bytes, region) = self.workbook().map_err(at)?;
+                let table = xlsx::XlsxTable::new(bytes, region, quantity);
                 let header = table.header().map_err(at)?;
                 (Box::new(table), header)
             }
@@ -137,8 +142,8 @@ impl Input {
             Format::Csv => csv::CsvTable::new(self.text()?, "").column_names(),
             Format::Json => json::JsonTable::new(self.text()?, "").column_names(),
             Format::Excel => {
-                let (bytes, sheet) = self.workbook()?;
-                xlsx::XlsxTable::new(bytes, sheet, "").column_names()
+                let (bytes, region) = self.workbook()?;
+                xlsx::XlsxTable::new(bytes, region, "").column_names()
             }
         }
     }
@@ -177,11 +182,11 @@ impl Input {
                 .load()
             }
             Format::Excel => {
-                let (bytes, sheet) = self.workbook()?;
+                let (bytes, region) = self.workbook()?;
                 let cm = xlsx::XlsxCostMap::new(bytes, s, k);
                 match op {
-                    Some(op) => cm.layer(op, sheet),
-                    None => cm.base(sheet),
+                    Some(op) => cm.layer(op, region),
+                    None => cm.base(region),
                 }
                 .load()
             }

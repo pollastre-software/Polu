@@ -231,6 +231,68 @@ textarea {
   padding: 4px 0;
 }
 
+.regions-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+/* a workbook's sheets and tables, two lines each */
+.regions {
+  position: relative;
+  max-height: 15em;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+button.region {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--text);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+button.region:last-child {
+  border-bottom: 0;
+}
+
+button.region:hover,
+button.region:focus-visible {
+  background: var(--accent-soft);
+  outline: none;
+}
+
+button.region[aria-selected="true"] {
+  background: var(--select);
+}
+
+.region .line {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.region .kind {
+  display: inline-block;
+  width: 3.5em;
+  font-size: 12px;
+}
+
+.region .columns {
+  padding-left: 3.5em;
+  font-size: 12px;
+}
+
 .error {
   background: var(--error-soft);
   color: var(--error);
