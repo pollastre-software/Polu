@@ -121,35 +121,15 @@ impl Model {
         #[wasm_bindgen(unchecked_param_type = "(lp: string) => LpResult")] solve: Function,
     ) -> Result<Model, JsError> {
         let spec: input::Spec = serde_wasm_bindgen::from_value(spec)?;
-        let (sources, source_header) = spec.sources.table("sources").map_err(js)?;
-        let (sinks, sink_header) = spec.sinks.table("sinks").map_err(js)?;
-        let caps = (spec.caps.as_ref())
-            .map(|caps| caps.table("caps"))
-            .transpose()
-            .map_err(js)?;
-
+        let spec = spec.into_spec().map_err(js)?;
         let mut layer_names: Vec<String> = (spec.base.iter())
-            .filter(|base| base.is_rules())
-            .map(|base| name(base, "base"))
+            .filter(|base| base.input.is_rule_table())
+            .map(|base| name(&base.name, "base"))
             .collect();
-        layer_names.extend(spec.layers.iter().map(|l| name(l, "layer")));
-        let costmap = input::Costmap {
-            base: spec.base,
-            layers: spec.layers,
-            source: source_header,
-            sink: sink_header,
-        };
+        layer_names.extend(spec.layers.iter().map(|l| name(&l.name, "layer")));
 
-        let mut polu = Polu::new(
-            sources,
-            sinks,
-            Box::new(costmap),
-            Box::new(JsSolver::new(solve)),
-            Box::new(NoStore),
-        );
-        if let Some((caps, _)) = caps {
-            polu = polu.with_source_caps(caps);
-        }
+        let solver = Box::new(JsSolver::new(solve));
+        let mut polu = spec.polu(solver, Box::new(NoStore)).map_err(js)?;
         polu.load_data().map_err(js)?;
         Ok(Self { polu, layer_names })
     }
@@ -405,7 +385,7 @@ pub fn column_names(
     #[wasm_bindgen(unchecked_param_type = "PoluInput")] input: JsValue,
 ) -> Result<Vec<String>, JsError> {
     let input: input::Input = serde_wasm_bindgen::from_value(input)?;
-    input.column_names().map_err(js)
+    input.adapter().map_err(js)?.column_names().map_err(js)
 }
 
 /// Every sheet of an Excel workbook in order, each followed by the named tables on it, with their
@@ -574,11 +554,10 @@ fn number(cost: f64) -> Option<f64> {
     (!cost.is_nan()).then_some(cost)
 }
 
-fn name(input: &input::Input, fallback: &str) -> String {
-    if input.name.is_empty() {
-        fallback.into()
-    } else {
-        input.name.clone()
+fn name(name: &str, fallback: &str) -> String {
+    match name {
+        "" => fallback.into(),
+        name => name.into(),
     }
 }
 

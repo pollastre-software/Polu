@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use calamine::{Data, Range, Reader, Sheets, open_workbook_auto_from_rs};
 
+use super::spec::Input;
 use super::{LayerColumns, TableColumns, base_cost};
 use crate::core::BoxError;
 use crate::core::traits::Load;
@@ -219,17 +220,6 @@ impl XlsxCostMap {
         self.layers.push((op, region.into()));
         self
     }
-
-    fn parse_layer(&self, op: Op, range: &Range<Data>) -> Result<Layer, BoxError> {
-        let header = header_row(range)?;
-        let columns = LayerColumns::new(op, &header, &self.source_header, &self.sink_header)?;
-        let mut rules = Vec::new();
-        for (row, cells) in body(range) {
-            let at = |e| format!("row {row}: {e}");
-            rules.push(columns.rule(&texts(cells).map_err(at)?).map_err(at)?);
-        }
-        Ok(Layer { op, rules })
-    }
 }
 
 impl Load<CostMap> for XlsxCostMap {
@@ -238,34 +228,121 @@ impl Load<CostMap> for XlsxCostMap {
         let mut layers = Vec::new();
         for (l, (op, region)) in self.layers.iter().enumerate() {
             let range = read(&mut book, region)?;
-            let layer = self
-                .parse_layer(*op, &range)
+            let layer = layer(*op, &range, &self.source_header, &self.sink_header)
                 .map_err(|e| format!("costmap layer {l} ({region}): {e}"))?;
             layers.push(layer);
         }
         let costmap = CostMap::new(self.source_header.clone(), self.sink_header.clone(), layers)?;
-        let Some(region) = &self.base else {
-            return Ok(costmap);
-        };
-        let range = read(&mut book, region)?;
-        // a table's header row labels the matrix; a sheet's matrix has none
-        let skip = matches!(region, Region::Table(_)) as usize;
-        let first = range.start().map_or(0, |(row, _)| row as usize + 1);
-        let mut costs = Vec::with_capacity(range.width() * range.height());
-        for (r, cells) in range.rows().enumerate().skip(skip) {
-            for cell in cells {
-                let cost = match cell {
-                    Data::Float(v) => Ok(*v),
-                    Data::Int(v) => Ok(*v as f64),
-                    Data::Empty => Ok(f64::NAN),
-                    Data::String(s) => base_cost(s.trim()),
-                    other => Err(format!("`{other}` is not a cost").into()),
-                };
-                costs.push(cost.map_err(|e| format!("base {region} row {}: {e}", first + r))?);
-            }
+        match &self.base {
+            Some(region) => Ok(costmap.with_base(base(&read(&mut book, region)?, region)?)?),
+            None => Ok(costmap),
         }
-        Ok(costmap.with_base(costs)?)
     }
+}
+
+/// One sheet or named table of a workbook for [`crate::load::spec`], read as whatever the spec
+/// needs it for: sources, sinks, caps, a layer or the base matrix. Without a region it reads the
+/// first sheet.
+#[derive(Debug, Clone)]
+pub struct XlsxInput {
+    workbook: Arc<[u8]>,
+    region: Option<Region>,
+}
+
+impl XlsxInput {
+    /// `workbook` is the file's bytes; pass the same bytes to several inputs to read them from one file.
+    pub fn new(workbook: impl Into<Arc<[u8]>>) -> Self {
+        Self {
+            workbook: workbook.into(),
+            region: None,
+        }
+    }
+
+    pub fn from_path(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        Ok(Self::new(std::fs::read(path)?))
+    }
+
+    /// Reads `region` instead of the first sheet.
+    pub fn with_region(mut self, region: impl Into<Region>) -> Self {
+        self.region = Some(region.into());
+        self
+    }
+
+    fn region(&self) -> Result<Region, BoxError> {
+        match &self.region {
+            Some(region) => Ok(region.clone()),
+            None => Ok(sheet_names(&self.workbook)?
+                .into_iter()
+                .next()
+                .ok_or("the workbook has no sheets")?
+                .into()),
+        }
+    }
+
+    fn table_loader(&self, quantity: &str) -> Result<XlsxTable, BoxError> {
+        Ok(XlsxTable::new(
+            self.workbook.clone(),
+            self.region()?,
+            quantity,
+        ))
+    }
+}
+
+impl Input for XlsxInput {
+    fn column_names(&self) -> Result<Vec<String>, BoxError> {
+        self.table_loader("")?.column_names()
+    }
+
+    fn header(&self, quantity: &str) -> Result<Header, BoxError> {
+        self.table_loader(quantity)?.header()
+    }
+
+    fn table(&self, quantity: &str) -> Result<Table, BoxError> {
+        self.table_loader(quantity)?.load()
+    }
+
+    fn layer(&self, op: Op, source: &Header, sink: &Header) -> Result<Layer, BoxError> {
+        let region = self.region()?;
+        let range = read(&mut workbook(&self.workbook)?, &region)?;
+        layer(op, &range, source, sink).map_err(|e| format!("{region}: {e}").into())
+    }
+
+    fn base(&self) -> Result<Vec<f64>, BoxError> {
+        let region = self.region()?;
+        base(&read(&mut workbook(&self.workbook)?, &region)?, &region)
+    }
+}
+
+fn layer(op: Op, range: &Range<Data>, source: &Header, sink: &Header) -> Result<Layer, BoxError> {
+    let header = header_row(range)?;
+    let columns = LayerColumns::new(op, &header, source, sink)?;
+    let mut rules = Vec::new();
+    for (row, cells) in body(range) {
+        let at = |e| format!("row {row}: {e}");
+        rules.push(columns.rule(&texts(cells).map_err(at)?).map_err(at)?);
+    }
+    Ok(Layer { op, rules })
+}
+
+/// The base matrix in `region`'s cells.
+fn base(range: &Range<Data>, region: &Region) -> Result<Vec<f64>, BoxError> {
+    // a table's header row labels the matrix; a sheet's matrix has none
+    let skip = matches!(region, Region::Table(_)) as usize;
+    let first = range.start().map_or(0, |(row, _)| row as usize + 1);
+    let mut costs = Vec::with_capacity(range.width() * range.height());
+    for (r, cells) in range.rows().enumerate().skip(skip) {
+        for cell in cells {
+            let cost = match cell {
+                Data::Float(v) => Ok(*v),
+                Data::Int(v) => Ok(*v as f64),
+                Data::Empty => Ok(f64::NAN),
+                Data::String(s) => base_cost(s.trim()),
+                other => Err(format!("`{other}` is not a cost").into()),
+            };
+            costs.push(cost.map_err(|e| format!("base {region} row {}: {e}", first + r))?);
+        }
+    }
+    Ok(costs)
 }
 
 /// The sheet names of a workbook, in workbook order.

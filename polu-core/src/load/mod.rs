@@ -1,6 +1,7 @@
 //! Loaders, one module per input format, each behind the cargo feature of the same name
 //! (`csv` is on by default; `xlsx` and `json` are opt-in). Every format reads the same shapes, a header row then rows of cells,
 //! so the column rules live here and a format module only turns its input into cells.
+//! [`spec`] describes a run's inputs without naming formats; each format module adapts to it.
 //!
 //! Sources and sinks: one quantity column plus up to 8 category columns, in header order.
 //! An empty category cell means the row doesn't specify it: `Set` layer rules for any value of it
@@ -36,6 +37,7 @@
 pub mod csv;
 #[cfg(feature = "json")]
 pub mod json;
+pub mod spec;
 #[cfg(feature = "xlsx")]
 pub mod xlsx;
 

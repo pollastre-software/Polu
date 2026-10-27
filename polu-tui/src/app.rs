@@ -5,8 +5,8 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use polu_core::{
-    Assignment, BoxError, CostMap, Header, HighsSolver, Key, Load, Op, Polu, Problem, SinkList,
-    Solver, SourceList, Store, Table, Trace,
+    Assignment, BoxError, CostMap, Header, HighsSolver, Key, Op, Polu, Problem, SinkList, Solver,
+    SourceList, Store, Table, Trace,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -429,29 +429,10 @@ impl App {
     }
 
     fn try_load(&self) -> Result<(Polu, Scenario), BoxError> {
-        let sources = self
-            .scenario
-            .sources
-            .as_ref()
-            .ok_or("pick a sources file")?;
-        let sinks = self.scenario.sinks.as_ref().ok_or("pick a sinks file")?;
-        let (source_loader, source_header) = io::table_loader(sources)?;
-        let (sink_loader, sink_header) = io::table_loader(sinks)?;
-        let scenario = self.scenario.clone();
-        let for_costmap = scenario.clone();
-        let costmap = Deferred(move || io::costmap(&for_costmap, &source_header, &sink_header));
-        let mut polu = Polu::new(
-            source_loader,
-            sink_loader,
-            Box::new(costmap),
-            Box::new(HighsSolver::default()),
-            Box::new(NoStore),
-        );
-        if let Some(caps) = &self.scenario.caps {
-            polu = polu.with_source_caps(io::table_loader(caps)?.0);
-        }
+        let spec = io::spec(&self.scenario)?;
+        let mut polu = spec.polu(Box::new(HighsSolver::default()), Box::new(NoStore))?;
         polu.load_data()?;
-        Ok((polu, scenario))
+        Ok((polu, self.scenario.clone()))
     }
 
     pub fn refilter_data(&mut self) {
@@ -1090,15 +1071,6 @@ fn rank(query: &str, all: &[PathBuf], root: &Path) -> Vec<usize> {
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     scored.into_iter().map(|(_, i)| i).collect()
-}
-
-/// A loader that runs a closure, so the costmap is built from the table headers at load time.
-struct Deferred<F>(F);
-
-impl<T, F: Fn() -> Result<T, BoxError>> Load<T> for Deferred<F> {
-    fn load(&self) -> Result<T, BoxError> {
-        (self.0)()
-    }
 }
 
 /// The Polu's store; the Save tab picks the real one by file extension.

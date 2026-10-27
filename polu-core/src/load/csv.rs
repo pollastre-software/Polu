@@ -5,6 +5,7 @@ use std::path::Path;
 
 use ::csv::{Reader, ReaderBuilder, Trim};
 
+use super::spec::Input;
 use super::{LayerColumns, TableColumns, base_cost};
 use crate::core::BoxError;
 use crate::core::traits::Load;
@@ -47,38 +48,19 @@ impl CsvTable {
 
     /// The category columns, in slot order. Pass these to [`CsvCostMap::new`].
     pub fn header(&self) -> Result<Header, BoxError> {
-        Ok(self.columns()?.header)
+        let columns = column_names(&self.text, self.delimiter)?;
+        Ok(TableColumns::new(&columns, &self.quantity_column)?.header)
     }
 
     /// Every column name, the quantity column included, e.g. to let a user pick the quantity column.
     pub fn column_names(&self) -> Result<Vec<String>, BoxError> {
-        let columns = reader(&self.text, self.delimiter, true).headers()?.clone();
-        Ok(columns.iter().map(Into::into).collect())
-    }
-
-    fn columns(&self) -> Result<TableColumns, BoxError> {
-        TableColumns::new(&self.column_names()?, &self.quantity_column)
+        column_names(&self.text, self.delimiter)
     }
 }
 
 impl Load<Table> for CsvTable {
     fn load(&self) -> Result<Table, BoxError> {
-        let columns = self.columns()?;
-        let mut rows = Vec::new();
-        for (line, record) in reader(&self.text, self.delimiter, true)
-            .records()
-            .enumerate()
-        {
-            let record = record?;
-            let line = line + 2; // 1-based, after the header
-            let cells: Vec<&str> = record.iter().collect();
-            rows.push(
-                columns
-                    .row(&cells)
-                    .map_err(|e| format!("line {line}: {e}"))?,
-            );
-        }
-        Ok(Table::new(columns.header, rows)?)
+        table(&self.text, self.delimiter, &self.quantity_column)
     }
 }
 
@@ -122,29 +104,6 @@ impl CsvCostMap {
         self.delimiter = delimiter;
         self
     }
-
-    fn parse_layer(&self, op: Op, text: &str) -> Result<Layer, BoxError> {
-        let mut reader = reader(text, self.delimiter, true);
-        let columns = reader.headers()?.clone();
-        let columns = LayerColumns::new(
-            op,
-            &columns.iter().collect::<Vec<_>>(),
-            &self.source_header,
-            &self.sink_header,
-        )?;
-        let mut rules = Vec::new();
-        for (line, record) in reader.records().enumerate() {
-            let record = record?;
-            let line = line + 2;
-            let cells: Vec<&str> = record.iter().collect();
-            rules.push(
-                columns
-                    .rule(&cells)
-                    .map_err(|e| format!("line {line}: {e}"))?,
-            );
-        }
-        Ok(Layer { op, rules })
-    }
 }
 
 impl Load<CostMap> for CsvCostMap {
@@ -154,22 +113,122 @@ impl Load<CostMap> for CsvCostMap {
             .iter()
             .enumerate()
             .map(|(l, (op, text))| {
-                self.parse_layer(*op, text)
-                    .map_err(|e| format!("costmap layer {l}: {e}").into())
+                layer(
+                    *op,
+                    text,
+                    self.delimiter,
+                    &self.source_header,
+                    &self.sink_header,
+                )
+                .map_err(|e| format!("costmap layer {l}: {e}").into())
             })
             .collect::<Result<Vec<_>, BoxError>>()?;
         let costmap = CostMap::new(self.source_header.clone(), self.sink_header.clone(), layers)?;
-        let Some(base) = &self.base else {
-            return Ok(costmap);
-        };
-        let mut costs = Vec::new();
-        for (line, record) in reader(base, self.delimiter, false).records().enumerate() {
-            for cell in record?.iter() {
-                costs.push(base_cost(cell).map_err(|e| format!("base line {}: {e}", line + 1))?);
-            }
+        match &self.base {
+            Some(text) => Ok(costmap.with_base(base(text, self.delimiter)?)?),
+            None => Ok(costmap),
         }
-        Ok(costmap.with_base(costs)?)
     }
+}
+
+/// One CSV text for [`crate::load::spec`], read as whatever the spec needs it for: sources, sinks,
+/// caps, a layer or the base matrix.
+#[derive(Debug, Clone)]
+pub struct CsvInput {
+    text: String,
+    delimiter: u8,
+}
+
+impl CsvInput {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            delimiter: b',',
+        }
+    }
+
+    pub fn from_path(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        Ok(Self::new(std::fs::read_to_string(path)?))
+    }
+
+    pub fn with_delimiter(mut self, delimiter: u8) -> Self {
+        self.delimiter = delimiter;
+        self
+    }
+}
+
+impl Input for CsvInput {
+    fn column_names(&self) -> Result<Vec<String>, BoxError> {
+        column_names(&self.text, self.delimiter)
+    }
+
+    fn table(&self, quantity: &str) -> Result<Table, BoxError> {
+        table(&self.text, self.delimiter, quantity)
+    }
+
+    fn layer(&self, op: Op, source: &Header, sink: &Header) -> Result<Layer, BoxError> {
+        layer(op, &self.text, self.delimiter, source, sink)
+    }
+
+    fn base(&self) -> Result<Vec<f64>, BoxError> {
+        base(&self.text, self.delimiter)
+    }
+}
+
+fn column_names(text: &str, delimiter: u8) -> Result<Vec<String>, BoxError> {
+    let columns = reader(text, delimiter, true).headers()?.clone();
+    Ok(columns.iter().map(Into::into).collect())
+}
+
+fn table(text: &str, delimiter: u8, quantity: &str) -> Result<Table, BoxError> {
+    let columns = TableColumns::new(&column_names(text, delimiter)?, quantity)?;
+    let mut rows = Vec::new();
+    for (line, record) in reader(text, delimiter, true).records().enumerate() {
+        let record = record?;
+        let line = line + 2; // 1-based, after the header
+        let cells: Vec<&str> = record.iter().collect();
+        rows.push(
+            columns
+                .row(&cells)
+                .map_err(|e| format!("line {line}: {e}"))?,
+        );
+    }
+    Ok(Table::new(columns.header, rows)?)
+}
+
+fn layer(
+    op: Op,
+    text: &str,
+    delimiter: u8,
+    source: &Header,
+    sink: &Header,
+) -> Result<Layer, BoxError> {
+    let mut reader = reader(text, delimiter, true);
+    let columns = reader.headers()?.clone();
+    let columns = LayerColumns::new(op, &columns.iter().collect::<Vec<_>>(), source, sink)?;
+    let mut rules = Vec::new();
+    for (line, record) in reader.records().enumerate() {
+        let record = record?;
+        let line = line + 2;
+        let cells: Vec<&str> = record.iter().collect();
+        rules.push(
+            columns
+                .rule(&cells)
+                .map_err(|e| format!("line {line}: {e}"))?,
+        );
+    }
+    Ok(Layer { op, rules })
+}
+
+/// The base matrix: no header, one cost per cell.
+fn base(text: &str, delimiter: u8) -> Result<Vec<f64>, BoxError> {
+    let mut costs = Vec::new();
+    for (line, record) in reader(text, delimiter, false).records().enumerate() {
+        for cell in record?.iter() {
+            costs.push(base_cost(cell).map_err(|e| format!("base line {}: {e}", line + 1))?);
+        }
+    }
+    Ok(costs)
 }
 
 fn reader(text: &str, delimiter: u8, has_headers: bool) -> Reader<&[u8]> {

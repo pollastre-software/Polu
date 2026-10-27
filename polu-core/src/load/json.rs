@@ -15,6 +15,7 @@ use std::path::Path;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::spec::Input;
 use super::{LayerColumns, TableColumns};
 use crate::core::BoxError;
 use crate::core::traits::Load;
@@ -49,28 +50,13 @@ impl JsonTable {
 
     /// Every column name, the quantity column included, e.g. to let a user pick the quantity column.
     pub fn column_names(&self) -> Result<Vec<String>, BoxError> {
-        #[derive(Deserialize)]
-        struct Headers {
-            headers: Vec<String>,
-        }
-        let Headers { headers } = serde_json::from_str(&self.text)?;
-        Ok(headers)
+        column_names(&self.text)
     }
 }
 
 impl Load<Table> for JsonTable {
     fn load(&self) -> Result<Table, BoxError> {
-        let wide: Wide<Value> = serde_json::from_str(&self.text)?;
-        let columns = TableColumns::new(&wide.headers, &self.quantity_column)?;
-        let mut rows = Vec::with_capacity(wide.data.len());
-        for (r, cells) in wide.rows()? {
-            rows.push(
-                columns
-                    .row(&texts(cells)?)
-                    .map_err(|e| format!("data[{r}]: {e}"))?,
-            );
-        }
-        Ok(Table::new(columns.header, rows)?)
+        table(&self.text, &self.quantity_column)
     }
 }
 
@@ -111,20 +97,6 @@ impl JsonCostMap {
         self.layers.push((op, text.into()));
         self
     }
-
-    fn parse_layer(&self, op: Op, text: &str) -> Result<Layer, BoxError> {
-        let wide: Wide<Value> = serde_json::from_str(text)?;
-        let columns = LayerColumns::new(op, &wide.headers, &self.source_header, &self.sink_header)?;
-        let mut rules = Vec::with_capacity(wide.data.len());
-        for (r, cells) in wide.rows()? {
-            rules.push(
-                columns
-                    .rule(&texts(cells)?)
-                    .map_err(|e| format!("data[{r}]: {e}"))?,
-            );
-        }
-        Ok(Layer { op, rules })
-    }
 }
 
 impl Load<CostMap> for JsonCostMap {
@@ -134,19 +106,95 @@ impl Load<CostMap> for JsonCostMap {
             .iter()
             .enumerate()
             .map(|(l, (op, text))| {
-                self.parse_layer(*op, text)
+                layer(*op, text, &self.source_header, &self.sink_header)
                     .map_err(|e| format!("costmap layer {l}: {e}").into())
             })
             .collect::<Result<Vec<_>, BoxError>>()?;
         let costmap = CostMap::new(self.source_header.clone(), self.sink_header.clone(), layers)?;
-        let Some(base) = &self.base else {
-            return Ok(costmap);
-        };
-        let base: Wide<Option<f64>> =
-            serde_json::from_str(base).map_err(|e| format!("base: {e}"))?;
-        let costs = base.data.into_iter().flatten();
-        Ok(costmap.with_base(costs.map(|c| c.unwrap_or(f64::NAN)).collect())?)
+        match &self.base {
+            Some(text) => Ok(costmap.with_base(base(text)?)?),
+            None => Ok(costmap),
+        }
     }
+}
+
+/// One wide JSON document for [`crate::load::spec`], read as whatever the spec needs it for:
+/// sources, sinks, caps, a layer or the base matrix.
+#[derive(Debug, Clone)]
+pub struct JsonInput {
+    text: String,
+}
+
+impl JsonInput {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+
+    pub fn from_path(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        Ok(Self::new(std::fs::read_to_string(path)?))
+    }
+}
+
+impl Input for JsonInput {
+    fn column_names(&self) -> Result<Vec<String>, BoxError> {
+        column_names(&self.text)
+    }
+
+    fn table(&self, quantity: &str) -> Result<Table, BoxError> {
+        table(&self.text, quantity)
+    }
+
+    fn layer(&self, op: Op, source: &Header, sink: &Header) -> Result<Layer, BoxError> {
+        layer(op, &self.text, source, sink)
+    }
+
+    fn base(&self) -> Result<Vec<f64>, BoxError> {
+        base(&self.text)
+    }
+}
+
+fn column_names(text: &str) -> Result<Vec<String>, BoxError> {
+    #[derive(Deserialize)]
+    struct Headers {
+        headers: Vec<String>,
+    }
+    let Headers { headers } = serde_json::from_str(text)?;
+    Ok(headers)
+}
+
+fn table(text: &str, quantity: &str) -> Result<Table, BoxError> {
+    let wide: Wide<Value> = serde_json::from_str(text)?;
+    let columns = TableColumns::new(&wide.headers, quantity)?;
+    let mut rows = Vec::with_capacity(wide.data.len());
+    for (r, cells) in wide.rows()? {
+        rows.push(
+            columns
+                .row(&texts(cells)?)
+                .map_err(|e| format!("data[{r}]: {e}"))?,
+        );
+    }
+    Ok(Table::new(columns.header, rows)?)
+}
+
+fn layer(op: Op, text: &str, source: &Header, sink: &Header) -> Result<Layer, BoxError> {
+    let wide: Wide<Value> = serde_json::from_str(text)?;
+    let columns = LayerColumns::new(op, &wide.headers, source, sink)?;
+    let mut rules = Vec::with_capacity(wide.data.len());
+    for (r, cells) in wide.rows()? {
+        rules.push(
+            columns
+                .rule(&texts(cells)?)
+                .map_err(|e| format!("data[{r}]: {e}"))?,
+        );
+    }
+    Ok(Layer { op, rules })
+}
+
+/// The base matrix: only `data`, `null` where the pair can't be used.
+fn base(text: &str) -> Result<Vec<f64>, BoxError> {
+    let base: Wide<Option<f64>> = serde_json::from_str(text).map_err(|e| format!("base: {e}"))?;
+    let costs = base.data.into_iter().flatten();
+    Ok(costs.map(|c| c.unwrap_or(f64::NAN)).collect())
 }
 
 /// The wide layout: `headers` (optional for the base matrix) and `data`.

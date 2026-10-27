@@ -55,6 +55,19 @@ pub struct Layer {
     pub rules: Vec<CostRule>,
 }
 
+impl Layer {
+    /// What [`CostMap::new`] checks: every rule but a `Block` rule has a finite value.
+    pub(crate) fn check(&self) -> Result<(), String> {
+        if self.op == Op::Block {
+            return Ok(());
+        }
+        match self.rules.iter().position(|r| !r.value.is_finite()) {
+            Some(i) => Err(format!("rule {i} has a non-finite value")),
+            None => Ok(()),
+        }
+    }
+}
+
 /// How one pair's cost was reached, from [`CostMap::trace`]: the base cost, then one step per layer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trace {
@@ -104,14 +117,9 @@ impl CostMap {
         layers: Vec<Layer>,
     ) -> Result<Self, PoluError> {
         for (l, layer) in layers.iter().enumerate() {
-            if layer.op == Op::Block {
-                continue;
-            }
-            if let Some(i) = layer.rules.iter().position(|r| !r.value.is_finite()) {
-                return Err(PoluError::Invalid(format!(
-                    "costmap layer {l}, rule {i} has a non-finite value"
-                )));
-            }
+            layer
+                .check()
+                .map_err(|e| PoluError::Invalid(format!("costmap layer {l}, {e}")))?;
         }
         Ok(Self {
             source_header,

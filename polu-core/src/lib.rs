@@ -1,5 +1,6 @@
 mod core;
-/// Loaders, one module per format behind its cargo feature, e.g. `load::csv::CsvTable`.
+/// Loaders, one module per format behind its cargo feature, e.g. `load::csv::CsvTable`, and
+/// `load::spec`, a run's inputs as format-free data.
 pub mod load;
 #[cfg(feature = "highs")]
 mod solver;

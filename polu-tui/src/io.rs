@@ -1,8 +1,9 @@
-//! Files: picking a polu-core loader or store by extension, scenario files, and the file search.
+//! Files: picking a polu-core input adapter or store by extension, scenario files, and the file search.
 
 use std::path::{Path, PathBuf};
 
-use polu_core::{BoxError, CostMap, Header, Load, Op, Store, Table};
+use polu_core::load::spec::{self, Spec};
+use polu_core::{BoxError, Op, Store};
 use serde::{Deserialize, Serialize};
 
 /// A file format, from the extension. Formats this build leaves out still parse, so the
@@ -77,12 +78,17 @@ impl FileRef {
         }
     }
 
-    /// The file name and its sheet or table, for lists.
-    pub fn label(&self) -> String {
-        let name = self.path.file_name().map_or_else(
+    /// The file name, for errors.
+    pub fn name(&self) -> String {
+        self.path.file_name().map_or_else(
             || self.path.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
-        );
+        )
+    }
+
+    /// The file name and its sheet or table, for lists.
+    pub fn label(&self) -> String {
+        let name = self.name();
         match (&self.table, &self.sheet) {
             (Some(table), _) => format!("{name} [table {table}]"),
             (None, Some(sheet)) => format!("{name} [{sheet}]"),
@@ -228,136 +234,70 @@ pub fn regions(path: &Path) -> Result<Option<Vec<Region>>, BoxError> {
     unreachable!("checked above")
 }
 
-/// Every column of a sources or sinks file, so the user can pick the quantity column.
-pub fn column_names(file: &FileRef) -> Result<Vec<String>, BoxError> {
-    match Format::check(&file.path)? {
+/// The polu-core input for a file, read by the adapter for its format.
+fn input(file: &FileRef) -> Result<Box<dyn spec::Input>, BoxError> {
+    let path = &file.path;
+    let read = |e: std::io::Error| -> BoxError { format!("{}: {e}", path.display()).into() };
+    match Format::check(path)? {
         #[cfg(feature = "csv")]
-        Format::Csv => polu_core::load::csv::CsvTable::from_path(&file.path, "")?.column_names(),
+        Format::Csv => Ok(Box::new(
+            polu_core::load::csv::CsvInput::from_path(path).map_err(read)?,
+        )),
         #[cfg(feature = "json")]
-        Format::Json => polu_core::load::json::JsonTable::from_path(&file.path, "")?.column_names(),
+        Format::Json => Ok(Box::new(
+            polu_core::load::json::JsonInput::from_path(path).map_err(read)?,
+        )),
         #[cfg(feature = "xlsx")]
         Format::Excel => {
-            polu_core::load::xlsx::XlsxTable::from_path(&file.path, region(file)?, "")?
-                .column_names()
+            let region = region(file)?;
+            let input = polu_core::load::xlsx::XlsxInput::from_path(path).map_err(read)?;
+            Ok(Box::new(input.with_region(region)))
         }
         #[allow(unreachable_patterns)]
         _ => unreachable!("checked above"),
     }
 }
 
-/// A loader for sources, sinks or source caps, and the header the costmap loader needs.
-pub fn table_loader(input: &TableInput) -> Result<(Box<dyn Load<Table>>, Header), BoxError> {
-    let (file, quantity) = (&input.file, input.quantity.as_str());
-    match Format::check(&file.path)? {
-        #[cfg(feature = "csv")]
-        Format::Csv => {
-            let table = polu_core::load::csv::CsvTable::from_path(&file.path, quantity)?;
-            let header = table.header()?;
-            Ok((Box::new(table), header))
-        }
-        #[cfg(feature = "json")]
-        Format::Json => {
-            let table = polu_core::load::json::JsonTable::from_path(&file.path, quantity)?;
-            let header = table.header()?;
-            Ok((Box::new(table), header))
-        }
-        #[cfg(feature = "xlsx")]
-        Format::Excel => {
-            let table =
-                polu_core::load::xlsx::XlsxTable::from_path(&file.path, region(file)?, quantity)?;
-            let header = table.header()?;
-            Ok((Box::new(table), header))
-        }
-        #[allow(unreachable_patterns)]
-        _ => unreachable!("checked above"),
-    }
+/// Every column of a sources or sinks file, so the user can pick the quantity column.
+pub fn column_names(file: &FileRef) -> Result<Vec<String>, BoxError> {
+    input(file)?.column_names()
 }
 
 /// Whether a base file is a rule table (`source.` and `sink.` columns, like a `Set` layer) rather
 /// than a headerless matrix. A rule table base is applied as a `Set` layer before the others.
 pub fn base_is_rules(file: &FileRef) -> bool {
-    column_names(file).is_ok_and(|columns| {
-        columns.iter().any(|c| {
-            let c = c.to_ascii_lowercase();
-            c.starts_with("source.") || c.starts_with("sink.")
-        })
-    })
+    input(file).is_ok_and(|input| input.is_rule_table())
 }
 
-/// Parses the base and every layer, each with the loader of its own format, into one costmap.
-/// Files may mix formats, e.g. an Excel base with CSV layers. The base can be a matrix or a rule
-/// table (see [`base_is_rules`]).
-pub fn costmap(
-    scenario: &Scenario,
-    source_header: &Header,
-    sink_header: &Header,
-) -> Result<CostMap, BoxError> {
-    // each format's loader parses its files; the layers are then gathered in scenario order
-    let one = |op: Option<Op>, file: &FileRef, what: &str| -> Result<CostMap, BoxError> {
-        let (s, k) = (source_header.clone(), sink_header.clone());
-        let what = format!("{what} {}", file.label());
-        let loaded: Result<CostMap, BoxError> = match Format::check(&file.path)? {
-            #[cfg(feature = "csv")]
-            Format::Csv => {
-                let text = std::fs::read_to_string(&file.path)?;
-                let cm = polu_core::load::csv::CsvCostMap::new(s, k);
-                match op {
-                    Some(op) => cm.layer(op, text),
-                    None => cm.base(text),
-                }
-                .load()
-            }
-            #[cfg(feature = "json")]
-            Format::Json => {
-                let text = std::fs::read_to_string(&file.path)?;
-                let cm = polu_core::load::json::JsonCostMap::new(s, k);
-                match op {
-                    Some(op) => cm.layer(op, text),
-                    None => cm.base(text),
-                }
-                .load()
-            }
-            #[cfg(feature = "xlsx")]
-            Format::Excel => {
-                let cm = polu_core::load::xlsx::XlsxCostMap::from_path(&file.path, s, k)?;
-                let region = region(file)?;
-                match op {
-                    Some(op) => cm.layer(op, region),
-                    None => cm.base(region),
-                }
-                .load()
-            }
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("checked above"),
-        };
-        loaded.map_err(|e| format!("{what}: {e}").into())
+/// The scenario as a polu-core input spec. Files may mix formats, e.g. an Excel base with CSV
+/// layers.
+pub fn spec(scenario: &Scenario) -> Result<Spec, BoxError> {
+    let sources = scenario.sources.as_ref().ok_or("pick a sources file")?;
+    let sinks = scenario.sinks.as_ref().ok_or("pick a sinks file")?;
+    let table = |t: &TableInput| -> Result<spec::TableInput, BoxError> {
+        Ok(spec::TableInput::new(
+            t.file.name(),
+            input(&t.file)?,
+            &t.quantity,
+        ))
     };
-
-    let (rules, matrix) = match &scenario.base {
-        Some(file) if base_is_rules(file) => (Some(file), None),
-        base => (None, base.as_ref()),
+    let layer = |l: &LayerInput| -> Result<spec::LayerInput, BoxError> {
+        Ok(spec::LayerInput::new(l.file.name(), input(&l.file)?, l.op))
     };
-    let mut layers = Vec::new();
-    if let Some(file) = rules {
-        layers.extend(one(Some(Op::Set), file, "base")?.layers().iter().cloned());
-    }
-    for layer in &scenario.layers {
-        let what = format!("{} layer", op_label(layer.op));
-        layers.extend(
-            one(Some(layer.op), &layer.file, &what)?
-                .layers()
-                .iter()
-                .cloned(),
-        );
-    }
-    let costmap = CostMap::new(source_header.clone(), sink_header.clone(), layers)?;
-    match matrix {
-        None => Ok(costmap),
-        Some(file) => {
-            let base = one(None, file, "base")?;
-            Ok(costmap.with_base(base.base().unwrap_or_default().to_vec())?)
-        }
-    }
+    let base = |file: &FileRef| -> Result<spec::BaseInput, BoxError> {
+        Ok(spec::BaseInput::new(file.name(), input(file)?))
+    };
+    Ok(Spec {
+        sources: table(sources)?,
+        caps: scenario.caps.as_ref().map(table).transpose()?,
+        sinks: table(sinks)?,
+        base: scenario.base.as_ref().map(base).transpose()?,
+        layers: scenario
+            .layers
+            .iter()
+            .map(layer)
+            .collect::<Result<_, _>>()?,
+    })
 }
 
 /// A store for the output path, by its extension.
