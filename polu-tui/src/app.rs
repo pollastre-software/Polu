@@ -223,13 +223,19 @@ impl Loaded {
         self.problem().routes.len()
     }
 
-    /// `, 2 caps` for the load message, naming caps that match no source row (they're left out).
+    /// `, 2 caps` for the load message, naming caps that match no source row (they bound nothing).
     pub fn caps_note(&self) -> String {
         let Some(table) = self.polu.source_caps() else {
             return String::new();
         };
-        let (rows, used) = (table.rows().len(), self.problem().caps.len());
-        match rows - used {
+        let rows = table.rows().len();
+        match self
+            .problem()
+            .caps
+            .iter()
+            .filter(|c| c.rows.is_empty())
+            .count()
+        {
             0 => format!(", {rows} caps"),
             unmatched => format!(", {rows} caps ({unmatched} match no source)"),
         }
@@ -274,9 +280,11 @@ pub struct App {
     pub solve: SolveState,
     pub flows: ListView,
     pub show_usage: bool,
-    /// The flows path, then the unused capacity (slack) path; `save_row` picks one.
+    /// The flows path, the unused capacity (slack) path, then the source cap use path; `save_row`
+    /// picks one.
     pub output: LineEdit,
     pub slack_output: LineEdit,
+    pub cap_slack_output: LineEdit,
     pub save_row: usize,
     pub editing_output: bool,
     /// The path the user was warned would be overwritten.
@@ -295,6 +303,7 @@ impl App {
     pub fn new(root: PathBuf) -> Self {
         let output = LineEdit::new(root.join("flows.csv").display().to_string());
         let slack_output = LineEdit::new(root.join("slack.csv").display().to_string());
+        let cap_slack_output = LineEdit::new(root.join("cap-slack.csv").display().to_string());
         Self {
             tab: Tab::Inputs,
             root,
@@ -316,6 +325,7 @@ impl App {
             show_usage: false,
             output,
             slack_output,
+            cap_slack_output,
             save_row: 0,
             editing_output: false,
             overwrite: None,
@@ -599,19 +609,25 @@ impl App {
         }
     }
 
-    /// The Save tab's selected path: flows or unused capacity.
+    /// The Save tab's selected path: flows, unused capacity or source cap use.
     pub fn save_path(&mut self) -> &mut LineEdit {
         match self.save_row {
             0 => &mut self.output,
-            _ => &mut self.slack_output,
+            1 => &mut self.slack_output,
+            _ => &mut self.cap_slack_output,
         }
     }
 
-    /// Writes the flows, or the unused source capacity, with the store the path's extension picks.
+    /// Writes the flows, the unused source capacity or the use of each source cap, with the store
+    /// the path's extension picks.
     pub fn save_output(&mut self) {
         let path = PathBuf::from(self.save_path().text.trim());
         if self.assignment().is_none() {
             return self.error("solve first (Solve tab)");
+        }
+        let no_caps = (self.loaded.as_ref()).is_none_or(|l| l.polu.source_caps().is_none());
+        if self.save_row == 2 && no_caps {
+            return self.error("no source caps to save: add a caps file on the Inputs tab");
         }
         if path.exists() && self.overwrite.as_ref() != Some(&path) {
             self.overwrite = Some(path.clone());
@@ -625,16 +641,26 @@ impl App {
             return;
         };
         let (sources, sinks) = loaded.tables();
-        let (result, saved) = if self.save_row == 0 {
-            let result = io::store(&path).and_then(|store| store.store(assignment, sources, sinks));
-            (result, format!("{} flows", assignment.flows.len()))
-        } else {
-            let slack = loaded.problem().slack(assignment);
-            let result = io::store(&path).and_then(|store| store.store_slack(&slack, sources));
-            (
-                result,
-                format!("unused capacity of {} sources", slack.len()),
-            )
+        let (result, saved) = match self.save_row {
+            0 => {
+                let result =
+                    io::store(&path).and_then(|store| store.store(assignment, sources, sinks));
+                (result, format!("{} flows", assignment.flows.len()))
+            }
+            1 => {
+                let slack = loaded.problem().slack(assignment);
+                let result = io::store(&path).and_then(|store| store.store_slack(&slack, sources));
+                (
+                    result,
+                    format!("unused capacity of {} sources", slack.len()),
+                )
+            }
+            _ => {
+                let caps = loaded.polu.source_caps().expect("checked above");
+                let slack = loaded.problem().cap_slack(assignment);
+                let result = io::store(&path).and_then(|store| store.store_cap_slack(&slack, caps));
+                (result, format!("use of {} source caps", slack.len()))
+            }
         };
         match result {
             Ok(()) => self.info(format!("saved {saved} to {}", path.display())),
@@ -745,8 +771,8 @@ impl App {
             }
             Tab::Save => match key.code {
                 KeyCode::Enter | KeyCode::Char('e') => self.editing_output = true,
-                KeyCode::Up | KeyCode::Char('k') => self.save_row = 0,
-                KeyCode::Down | KeyCode::Char('j') => self.save_row = 1,
+                KeyCode::Up | KeyCode::Char('k') => self.save_row = self.save_row.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => self.save_row = (self.save_row + 1).min(2),
                 _ => {}
             },
         }
@@ -1276,7 +1302,7 @@ pub(crate) mod tests {
     use super::*;
     use ratatui::crossterm::event::KeyEventKind;
 
-    fn press(app: &mut App, keys: &str) {
+    pub(crate) fn press(app: &mut App, keys: &str) {
         for c in keys.chars() {
             app.handle(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
@@ -1514,6 +1540,22 @@ pub(crate) mod tests {
         press(&mut app, "4s");
         app.wait();
         assert_eq!(app.assignment().unwrap().objective, 26.0);
+
+        // the third Save path writes how much of each cap is used
+        let out =
+            std::env::temp_dir().join(format!("polu-tui-cap-slack-{}.csv", std::process::id()));
+        app.cap_slack_output = LineEdit::new(out.display().to_string());
+        app.tab = Tab::Save;
+        press(&mut app, "jj");
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Enter);
+        let written = std::fs::read_to_string(&out).unwrap();
+        std::fs::remove_file(&out).ok();
+        assert!(!app.message.as_ref().unwrap().0, "{:?}", app.message);
+        assert_eq!(
+            written,
+            "source.business,used,cap,unused,percent_used\napple inc,2,2,0,100\ncherries,0,1,1,0\n"
+        );
     }
 
     #[cfg(feature = "xlsx")]

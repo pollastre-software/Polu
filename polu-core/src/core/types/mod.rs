@@ -106,7 +106,8 @@ impl Table {
 
     /// One limit per row of `caps`, over the rows of this table it matches: every field the cap sets
     /// must be set and equal in the row (as `Scale`, `Add` and `Block` rules match). Cap columns are
-    /// matched to this table's columns by name. A cap that matches no row is left out.
+    /// matched to this table's columns by name. A cap that matches no row keeps an empty limit, so
+    /// limit `i` is always cap row `i`.
     pub fn caps(&self, caps: &Table) -> Result<Vec<Limit>, PoluError> {
         // (cap slot, table slot)
         let mut slots = Vec::new();
@@ -127,16 +128,15 @@ impl Table {
         Ok(caps
             .rows
             .iter()
-            .filter_map(|(cap, amount)| {
+            .map(|(cap, amount)| {
                 let mut fields: [Option<Box<str>>; SLOTS] = Default::default();
                 for &(c, slot) in &slots {
                     fields[slot] = cap.0[c].clone();
                 }
-                let rows = index.rows_matching(&Key(fields), false);
-                (!rows.is_empty()).then_some(Limit {
-                    rows,
+                Limit {
+                    rows: index.rows_matching(&Key(fields), false),
                     amount: *amount,
-                })
+                }
             })
             .collect())
     }
@@ -160,7 +160,8 @@ pub struct Limit {
 /// Solver-neutral transport problem: minimise the sum of cost * flow over `routes`, with integer flows,
 /// total flow out of the rows of each `supply` and `caps` limit `<= amount` and total flow into the rows
 /// of each `demand` limit `== amount`. `supply[i]` and `demand[j]` belong to source row i and sink row j;
-/// `caps` come from a source cap table (see [`Table::caps`]) and belong to no row, so they add no routes.
+/// `caps` come from a source cap table (see [`Table::caps`]): `caps[i]` is cap row `i`, and caps belong
+/// to no source row, so they add no routes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Problem {
     pub routes: Vec<Route>,
@@ -173,11 +174,7 @@ impl Problem {
     /// Unused capacity of each supply limit under `assignment`; `slack[i]` belongs to source row i.
     /// Computed from the flows rather than read from the solver, so every solver reports it the same way.
     pub fn slack(&self, assignment: &Assignment) -> Vec<Slack> {
-        let mut shipped = vec![0i64; self.supply.len()];
-        for flow in &assignment.flows {
-            shipped[flow.source] += flow.units;
-        }
-        let used = |limit: &Limit| -> i64 { limit.rows.iter().map(|&r| shipped[r]).sum() };
+        let used = self.shipped(assignment);
         // a row can ship more only while every limit over it, caps included, has room
         let mut spare: Vec<i64> = vec![i64::MAX; self.supply.len()];
         for limit in self.supply.iter().chain(&self.caps) {
@@ -196,6 +193,28 @@ impl Problem {
                 spare,
             })
             .collect()
+    }
+
+    /// How much of each source cap `assignment` uses; `cap_slack[i]` belongs to cap row i. Empty
+    /// without caps.
+    pub fn cap_slack(&self, assignment: &Assignment) -> Vec<CapSlack> {
+        let used = self.shipped(assignment);
+        self.caps
+            .iter()
+            .map(|limit| CapSlack {
+                used: used(limit),
+                amount: limit.amount,
+            })
+            .collect()
+    }
+
+    /// Units shipped out of a limit's rows under `assignment`.
+    fn shipped(&self, assignment: &Assignment) -> impl Fn(&Limit) -> i64 {
+        let mut shipped = vec![0i64; self.supply.len()];
+        for flow in &assignment.flows {
+            shipped[flow.source] += flow.units;
+        }
+        move |limit| limit.rows.iter().map(|&r| shipped[r]).sum()
     }
 
     /// The assignment for one solved value per route (`columns[i]` is `routes[i]`), rounded to whole
@@ -314,6 +333,31 @@ impl Slack {
     /// `amount - used`: the limit's slack, as the solver's row slack would report it.
     pub fn unused(&self) -> i64 {
         self.amount - self.used
+    }
+}
+
+/// How much of one source cap a solution uses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapSlack {
+    /// Units shipped from the source rows the cap matches.
+    pub used: i64,
+    /// The cap.
+    pub amount: i64,
+}
+
+impl CapSlack {
+    /// `amount - used`: what the cap still allows.
+    pub fn unused(&self) -> i64 {
+        self.amount - self.used
+    }
+
+    /// `used` as a whole percentage of `amount`, rounded down so only a full cap reads 100. A cap
+    /// of 0 is full.
+    pub fn percent_used(&self) -> i64 {
+        match self.amount {
+            0 => 100,
+            amount => self.used * 100 / amount,
+        }
     }
 }
 

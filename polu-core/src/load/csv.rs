@@ -319,7 +319,12 @@ bananas and more,ohio fruits,3
             ),
             Box::new(HighsSolver::default()),
             Box::new(CsvStore::new(&path)),
-        );
+        )
+        // loose enough not to change the plan; cherries matches no source
+        .with_source_caps(Box::new(CsvTable::new(
+            "business,cap\napple inc,8\nbananas and more,30\ncherries,1\n",
+            "cap",
+        )));
         polu.load_data().unwrap();
         let assignment = polu.run().unwrap();
         // the `small` scale rule only doubles [apple inc, small]: rows with no size keep their cost.
@@ -354,5 +359,22 @@ bananas and more,ohio fruits,3
         );
         assert_eq!(lines.next(), Some("apple inc,,5,5,0,0"));
         assert!(slack.ends_with("bananas and more,,4,20,16,16\n"), "{slack}");
+
+        // cap slack: one line per cap row, with how much of the cap is used
+        let mut caps = Vec::new();
+        CsvStore::new(&path)
+            .write_cap_slack(
+                &mut caps,
+                &polu.cap_slack().unwrap(),
+                polu.source_caps().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(caps).unwrap(),
+            "source.business,used,cap,unused,percent_used\n\
+             apple inc,5,8,3,62\n\
+             bananas and more,4,30,26,13\n\
+             cherries,0,1,1,0\n"
+        );
     }
 }

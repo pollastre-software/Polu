@@ -454,6 +454,15 @@ td.bar span {
   background: var(--accent);
 }
 
+#panel h3 {
+  margin: 24px 0 4px;
+  font-size: 14px;
+}
+
+tr.full td {
+  font-weight: 600;
+}
+
 .trace {
   background: var(--surface);
   border: 1px solid var(--line);

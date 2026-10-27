@@ -4,6 +4,8 @@
 //!
 //! `store_slack` writes the unused source capacity the same way: one row per source row with its
 //! `source.<column>`s, then `used`, `capacity`, `unused` and `spare` (see [`crate::Slack`]).
+//! `store_cap_slack` writes one row per source cap with the cap table's `source.<column>`s, then
+//! `used`, `cap`, `unused` and `percent_used` (see [`crate::CapSlack`]).
 
 #![cfg_attr(
     not(any(feature = "csv", feature = "xlsx", feature = "json")),
@@ -17,7 +19,7 @@ pub mod json;
 #[cfg(feature = "xlsx")]
 pub mod xlsx;
 
-use crate::core::types::{Assignment, Header, SinkList, Slack, SourceList};
+use crate::core::types::{Assignment, CapSlack, Header, SinkList, Slack, SourceList, Table};
 
 /// A table to write: column names, then rows of category cells (`None` where a row leaves a field
 /// empty) followed by numbers, so every format writes flows and slack alike.
@@ -37,22 +39,44 @@ fn flow_table<'a>(
 
 /// The slack table: `source.<column>`..., `used`, `capacity`, `unused`, `spare`, one row per source row.
 fn slack_table<'a>(slack: &'a [Slack], sources: &'a SourceList) -> (Vec<String>, Rows<'a>) {
-    let slots = named(sources.header());
-    let mut columns: Vec<String> = slots
+    let (mut columns, cells) = source_cells(sources);
+    columns.extend(["used", "capacity", "unused", "spare"].map(String::from));
+    let rows = slack
+        .iter()
+        .zip(cells)
+        .map(|(s, cells)| (cells, vec![s.used, s.amount, s.unused(), s.spare]));
+    (columns, Box::new(rows))
+}
+
+/// The cap slack table: the cap table's `source.<column>`..., `used`, `cap`, `unused`,
+/// `percent_used`, one row per cap.
+fn cap_slack_table<'a>(slack: &'a [CapSlack], caps: &'a Table) -> (Vec<String>, Rows<'a>) {
+    let (mut columns, cells) = source_cells(caps);
+    columns.extend(["used", "cap", "unused", "percent_used"].map(String::from));
+    let rows = slack
+        .iter()
+        .zip(cells)
+        .map(|(s, cells)| (cells, vec![s.used, s.amount, s.unused(), s.percent_used()]));
+    (columns, Box::new(rows))
+}
+
+/// A source-side table's `source.<column>` names, and each row's cells under them.
+fn source_cells(table: &Table) -> (Vec<String>, impl Iterator<Item = Vec<Option<&str>>>) {
+    let slots = named(table.header());
+    let columns = slots
         .iter()
         .map(|&s| {
             format!(
                 "source.{}",
-                sources.header()[s].as_deref().unwrap_or_default()
+                table.header()[s].as_deref().unwrap_or_default()
             )
         })
         .collect();
-    columns.extend(["used", "capacity", "unused", "spare"].map(String::from));
-    let rows = slack.iter().zip(sources.rows()).map(move |(s, (key, _))| {
-        let cells = slots.iter().map(|&slot| key.get_slot(slot)).collect();
-        (cells, vec![s.used, s.amount, s.unused(), s.spare])
-    });
-    (columns, Box::new(rows))
+    let cells = table
+        .rows()
+        .iter()
+        .map(move |(key, _)| slots.iter().map(|&slot| key.get_slot(slot)).collect());
+    (columns, cells)
 }
 
 /// The column names: `source.<column>`..., `sink.<column>`..., `units`.

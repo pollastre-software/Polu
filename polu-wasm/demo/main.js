@@ -499,6 +499,8 @@ function showError(message) {
 }
 
 function renderSummary() {
+  // cap use downloads only make sense with caps
+  for (const el of document.querySelectorAll("[data-caps]")) el.hidden = !view?.caps;
   if (!view?.solution) return $("summary").replaceChildren();
   const { solution, sources, sinks, routes } = view;
   const units = solution.flows.reduce((a, f) => a + f.units, 0);
@@ -585,7 +587,8 @@ function costMatrix(solution) {
 }
 
 function unusedTable() {
-  const { sources, slack } = view;
+  const { sources, slack, caps, capSlack } = view;
+  const bar = (used, amount) => h("td", { class: "bar" }, h("span", { style: `width:${amount ? (100 * used) / amount : 100}%` }));
   return h("div", {},
     h("p", { class: "muted" }, "A row with an empty field caps the rows under it, so a site can have room of its own (unused) yet none to spare once its business total is reached."),
     h("table", {},
@@ -597,7 +600,21 @@ function unusedTable() {
           h("td", { class: "num" }, fmt(s.amount)),
           h("td", { class: "num" }, fmt(s.unused)),
           h("td", { class: "num" }, fmt(s.spare)),
-          h("td", { class: "bar" }, h("span", { style: `width:${s.amount ? (100 * s.used) / s.amount : 0}%` })))))));
+          bar(s.used, s.amount))))),
+    capSlack?.length ? [
+      h("h3", {}, "Source caps"),
+      h("p", { class: "muted" }, "What ships under each cap, what it still allows, and how much of it is used. A full cap is why the rows under it have no spare."),
+      h("table", {},
+        h("thead", {}, h("tr", {}, ["Source cap", "Used", "Cap", "Unused", "Used %", ""].map((t) => h("th", {}, t)))),
+        h("tbody", {}, capSlack.map((c, i) =>
+          h("tr", { class: c.unused === 0 ? "full" : null },
+            h("td", {}, caps.rows[i].label),
+            h("td", { class: "num" }, fmt(c.used)),
+            h("td", { class: "num" }, fmt(c.amount)),
+            h("td", { class: "num" }, fmt(c.unused)),
+            h("td", { class: "num" }, `${c.percentUsed}%`),
+            bar(c.used, c.amount))))),
+    ] : null);
 }
 
 // ---- cost trace
@@ -663,7 +680,8 @@ async function download(what, format) {
   }
   const types = { csv: "text/csv", json: "application/json", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" };
   const url = URL.createObjectURL(new Blob([bytes], { type: types[format] }));
-  h("a", { href: url, download: `${what === "flows" ? "flows" : "unused"}.${format}` }).click();
+  const names = { flows: "flows", slack: "unused", caps: "cap-use" };
+  h("a", { href: url, download: `${names[what]}.${format}` }).click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 

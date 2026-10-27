@@ -4,7 +4,9 @@ pub(crate) mod types;
 use std::{error::Error, fmt};
 
 use traits::{Load, Solver, Store};
-use types::{Assignment, CostMap, Limit, Problem, Route, SinkList, Slack, SourceList, Table};
+use types::{
+    Assignment, CapSlack, CostMap, Limit, Problem, Route, SinkList, Slack, SourceList, Table,
+};
 
 /// Error type returned by every adapter (loaders, solvers, stores).
 pub type BoxError = Box<dyn Error + Send + Sync>;
@@ -224,6 +226,11 @@ impl Polu {
     /// Unused source capacity of the last solution, see [`Problem::slack`].
     pub fn slack(&self) -> Option<Vec<Slack>> {
         Some(self.problem.as_ref()?.slack(self.solution.as_ref()?))
+    }
+
+    /// How much of each source cap the last solution uses, see [`Problem::cap_slack`].
+    pub fn cap_slack(&self) -> Option<Vec<CapSlack>> {
+        Some(self.problem.as_ref()?.cap_slack(self.solution.as_ref()?))
     }
 }
 
@@ -691,10 +698,10 @@ mod tests {
         )
         .unwrap();
         let caps = sources.caps(&by_site).unwrap();
-        // [large] covers both large rows; [huge] matches nothing and is left out;
+        // [large] covers both large rows; [huge] matches nothing and keeps an empty limit;
         // the partial [apple inc, *] row has no site, so no site cap reaches it
-        assert_eq!(rows(&caps), [vec![0, 3]]);
-        assert_eq!(caps[0].amount, 6);
+        assert_eq!(rows(&caps), [vec![0, 3], vec![]]);
+        assert_eq!((caps[0].amount, caps[1].amount), (6, 9));
 
         let by_region = Table::new(header(&["region"]), vec![(key(&["apple inc"]), 8)]).unwrap();
         assert_eq!(rows(&sources.caps(&by_region).unwrap()), [vec![0, 1, 2]]);
@@ -742,6 +749,9 @@ mod tests {
             (slack[1].used, slack[1].unused(), slack[1].spare),
             (0, 10, 2)
         );
+        // and the cap itself: 4 of 6 used, 2 left
+        let cap = &problem.cap_slack(&shipped)[0];
+        assert_eq!((cap.used, cap.unused(), cap.percent_used()), (4, 2, 66));
     }
 
     /// Business total 5 over [large] = 3 and [small] = 7: at most 5 apple inc units ship in total,
@@ -1017,14 +1027,21 @@ mod tests {
         .with_source_caps(Box::new(Fixed(caps)));
 
         let problem = polu.load_data().unwrap();
-        // one route per source row, the cap adds none; the cherries cap matches nothing and is left out
+        // one route per source row, the caps add none; the cherries cap matches nothing, so its
+        // limit is empty
         assert_eq!(problem.routes.len(), 3);
         assert_eq!(
             problem.caps,
-            [Limit {
-                rows: vec![0, 1],
-                amount: 5
-            }]
+            [
+                Limit {
+                    rows: vec![0, 1],
+                    amount: 5
+                },
+                Limit {
+                    rows: vec![],
+                    amount: 1
+                }
+            ]
         );
         assert_eq!(polu.source_caps().unwrap().rows().len(), 2);
 
@@ -1040,6 +1057,11 @@ mod tests {
         // the cap is full, so neither apple inc row has spare capacity left
         let spare: Vec<i64> = polu.slack().unwrap().iter().map(|s| s.spare).collect();
         assert_eq!(spare, [0, 0, 16]);
+        // one entry per cap row: apple inc is full, cherries ships nothing
+        let caps: Vec<_> = (polu.cap_slack().unwrap().iter())
+            .map(|c| (c.used, c.amount, c.unused(), c.percent_used()))
+            .collect();
+        assert_eq!(caps, [(5, 5, 0, 100), (0, 1, 1, 0)]);
     }
 
     #[test]

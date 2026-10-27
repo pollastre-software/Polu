@@ -80,7 +80,7 @@ fn hint(app: &App) -> &'static str {
         }
         Tab::Solve => "q quit · ? help · s solve · / filter · u use vs capacity · ↑↓ scroll",
         Tab::Save => {
-            "q quit · ? help · ↑↓ flows/unused capacity · Enter edit path, Enter again to save"
+            "q quit · ? help · ↑↓ flows/unused capacity/caps · Enter edit path, Enter again to save"
         }
     }
 }
@@ -414,6 +414,17 @@ fn solve(frame: &mut Frame, area: Rect, app: &mut App) {
         let slack = problem.slack(a);
         let [left, right] =
             Layout::horizontal([Constraint::Fill(3), Constraint::Fill(2)]).areas(rest);
+        // source caps, under the sources: how much of each is used and what it still allows
+        let caps = loaded.polu.source_caps();
+        let (left, caps_area) = match caps {
+            Some(caps) => {
+                let height = (caps.rows().len() as u16 + 3).min(left.height / 2);
+                let [top, bottom] =
+                    Layout::vertical([Constraint::Fill(1), Constraint::Length(height)]).areas(left);
+                (top, Some(bottom))
+            }
+            None => (left, None),
+        };
         for (area, title, limits, table, slots, sent, verb, slack) in [
             (
                 left,
@@ -469,6 +480,37 @@ fn solve(frame: &mut Frame, area: Rect, app: &mut App) {
                 area,
             );
         }
+        if let (Some(caps), Some(area)) = (caps, caps_area) {
+            let slots = named(caps.header());
+            let rows = problem
+                .cap_slack(a)
+                .into_iter()
+                .zip(caps.rows())
+                .map(|(cap, (key, _))| {
+                    let mut cells = fields(key, &slots);
+                    cells.extend([
+                        format!("{} / {}", cap.used, cap.amount),
+                        cap.unused().to_string(),
+                        format!("{}%", cap.percent_used()),
+                    ]);
+                    let row = Row::new(cells);
+                    if cap.unused() == 0 { row.bold() } else { row }
+                });
+            let mut names: Vec<String> = slots.iter().map(|&s| name(caps.header(), s)).collect();
+            names.extend(["shipped".into(), "unused".into(), "% used".into()]);
+            let mut widths = vec![Constraint::Fill(1); slots.len()];
+            widths.extend([
+                Constraint::Length(14),
+                Constraint::Length(8),
+                Constraint::Length(6),
+            ]);
+            frame.render_widget(
+                Table::new(rows, widths)
+                    .header(Row::new(names).dark_gray())
+                    .block(Block::bordered().title(" Source caps: shipped / cap, unused, % used ")),
+                area,
+            );
+        }
         return;
     }
 
@@ -517,7 +559,8 @@ fn save(frame: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::bordered().title(" Output files ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [flows, slack, notes] = Layout::vertical([
+    let [flows, slack, caps, notes] = Layout::vertical([
+        Constraint::Length(2),
         Constraint::Length(2),
         Constraint::Length(2),
         Constraint::Min(1),
@@ -526,6 +569,7 @@ fn save(frame: &mut Frame, area: Rect, app: &mut App) {
     for (row, area, label, edit) in [
         (0, flows, "Flows:  ", &app.output),
         (1, slack, "Unused: ", &app.slack_output),
+        (2, caps, "Caps:   ", &app.cap_slack_output),
     ] {
         let selected = app.save_row == row;
         let [marker, line] =
@@ -542,6 +586,10 @@ fn save(frame: &mut Frame, area: Rect, app: &mut App) {
             Line::from(
                 "Unused writes each source row's used, capacity, unused (capacity - used) and spare \
                  (what it could still ship under every cap over it).",
+            )
+            .dark_gray(),
+            Line::from(
+                "Caps writes each source cap's used, cap, unused (cap - used) and percent_used.",
             )
             .dark_gray(),
             Line::from(format!(
@@ -714,10 +762,11 @@ Costs       o cycles the sort, h shows pairs with no route, t toggles the trace 
 Solve       s runs HiGHS in the background. u switches between the flows and each
             row's use against its capacity or demand (partial rows count every row they cap).
             Sources also show unused capacity (capacity - used) and spare: what the row could
-            still ship before it or any partial row over it is full.
+            still ship before it or any partial row over it is full. Source caps show what
+            ships under each cap, what it still allows and the share used.
 
-Save        ↑/↓ pick the flows or the unused capacity path. Enter edits it, Enter again
-            writes it. The extension picks the format.";
+Save        ↑/↓ pick the flows, unused capacity or source cap path. Enter edits it, Enter
+            again writes it. The extension picks the format.";
 
 // ----- helpers -----
 
@@ -956,6 +1005,47 @@ mod tests {
         assert!(text.contains("slack.csv"), "{text}");
         app.popup = Some(Popup::Help);
         assert!(screen(&mut app).contains("Filters"));
+    }
+
+    #[cfg(feature = "csv")]
+    #[test]
+    fn source_caps_show_their_use_under_the_sources() {
+        use crate::app::tests::{press, sample};
+        use crate::io::{FileRef, TableInput};
+
+        let caps =
+            std::env::temp_dir().join(format!("polu-tui-ui-caps-{}.csv", std::process::id()));
+        std::fs::write(&caps, "business,cap\napple inc,2\ncherries,1\n").unwrap();
+        let mut app = App::new(sample(""));
+        app.open_scenario(&sample("apples.polu.json"));
+        app.scenario.caps = Some(TableInput {
+            file: FileRef::new(caps.clone()),
+            quantity: "cap".into(),
+        });
+        press(&mut app, "l4s");
+        app.wait();
+        std::fs::remove_file(&caps).ok();
+        app.tab = Tab::Solve;
+        app.show_usage = true;
+        let text = screen(&mut app);
+        assert!(
+            text.contains("Source caps: shipped / cap, unused, % used"),
+            "{text}"
+        );
+        // apple inc's cap is full; cherries matches no source and ships nothing
+        let row = |name: &str| {
+            text.lines()
+                .find(|l| l.contains(name) && l.contains('%'))
+                .unwrap()
+        };
+        assert!(
+            row("apple inc").contains("2 / 2") && row("apple inc").contains("100%"),
+            "{text}"
+        );
+        assert!(
+            row("cherries").contains("0 / 1") && row("cherries").contains("0%"),
+            "{text}"
+        );
     }
 
     #[test]

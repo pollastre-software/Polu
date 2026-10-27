@@ -15,7 +15,7 @@ pub use crate::core::types::{
     CostMap, CostRule, Header, Key, Layer, Op, SinkList, SourceList, Table, Trace, TraceStep,
 };
 // solver contract (what solvers read and return, and stores read)
-pub use crate::core::types::{Assignment, Flow, Limit, Problem, Route, Slack};
+pub use crate::core::types::{Assignment, CapSlack, Flow, Limit, Problem, Route, Slack};
 
 // solver adapter, behind the `highs` cargo feature (on by default)
 #[cfg(feature = "highs")]

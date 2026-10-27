@@ -58,14 +58,16 @@ const calls = {
     return { text: text.slice(0, limit), length: text.length };
   },
 
+  /** `what` is flows, slack (unused source capacity) or caps (the use of each source cap). */
   export(send, what, format) {
-    return what === "flows" ? model.exportFlows(format) : model.exportSlack(format);
+    if (what === "flows") return model.exportFlows(format);
+    return what === "caps" ? model.exportCapSlack(format) : model.exportSlack(format);
   },
 };
 
 /**
- * What the page draws: the tables and layers, the solution and unused capacity (null before a
- * solve), and the costs of the top-left `corner` x `corner` pairs for the cost map.
+ * What the page draws: the tables and layers, the solution, unused capacity and cap use (null
+ * before a solve), and the costs of the top-left `corner` x `corner` pairs for the cost map.
  */
 function view(routes, corner) {
   const sources = model.sources();
@@ -79,11 +81,13 @@ function view(routes, corner) {
   return {
     sources,
     sinks,
+    caps: model.caps() ?? null,
     layers: model.layers(),
     routes: routes.length,
     costs,
     solution,
     slack: solution ? model.slack() : null,
+    capSlack: solution ? model.capSlack() : null,
   };
 }
 

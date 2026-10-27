@@ -79,6 +79,8 @@ export interface SolutionView {
   flows: { source: number; sink: number; units: number; cost: number }[];
 }
 export interface SlackView { used: number; amount: number; unused: number; spare: number }
+/** One source cap's use: `unused` is what it still allows, `percentUsed` is rounded down. */
+export interface CapSlackView { used: number; amount: number; unused: number; percentUsed: number }
 /** A sheet or named table of a workbook; `sheet` is the sheet it's on (its own name for a sheet). */
 export interface RegionView {
   kind: "sheet" | "table";
@@ -316,6 +318,48 @@ impl Model {
         Ok(out)
     }
 
+    /// How much of each source cap the last solution uses, one entry per row of [`Model::caps`];
+    /// empty without caps. See [`polu_core::Problem::cap_slack`].
+    #[wasm_bindgen(js_name = capSlack, unchecked_return_type = "CapSlackView[]")]
+    pub fn cap_slack(&self) -> Result<JsValue, JsError> {
+        let slack: Vec<CapSlackView> = self
+            .polu
+            .cap_slack()
+            .ok_or_else(|| JsError::new("call solve() first"))?
+            .iter()
+            .map(|c| CapSlackView {
+                used: c.used,
+                amount: c.amount,
+                unused: c.unused(),
+                percent_used: c.percent_used(),
+            })
+            .collect();
+        to_js(&slack)
+    }
+
+    /// The use of each source cap in the last solution as a `csv`, `json` or `xlsx` file.
+    #[wasm_bindgen(js_name = exportCapSlack)]
+    pub fn export_cap_slack(&self, format: &str) -> Result<Vec<u8>, JsError> {
+        let slack = self
+            .polu
+            .cap_slack()
+            .ok_or_else(|| JsError::new("call solve() first"))?;
+        let caps =
+            (self.polu.source_caps()).ok_or_else(|| JsError::new("there are no source caps"))?;
+        let mut out = Vec::new();
+        match format {
+            "csv" => CsvStore::new("").write_cap_slack(&mut out, &slack, caps),
+            "json" => JsonStore::new("").write_cap_slack(&mut out, &slack, caps),
+            "xlsx" => XlsxStore::new("")
+                .cap_slack_workbook(&slack, caps)
+                .and_then(|mut book| Ok(book.save_to_buffer()?))
+                .map(|bytes| out = bytes),
+            other => return Err(JsError::new(&format!("unknown format `{other}`"))),
+        }
+        .map_err(js)?;
+        Ok(out)
+    }
+
     /// The unused capacity of the last solution as a `csv`, `json` or `xlsx` file.
     #[wasm_bindgen(js_name = exportSlack)]
     pub fn export_slack(&self, format: &str) -> Result<Vec<u8>, JsError> {
@@ -496,6 +540,15 @@ struct SlackView {
     amount: i64,
     unused: i64,
     spare: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapSlackView {
+    used: i64,
+    amount: i64,
+    unused: i64,
+    percent_used: i64,
 }
 
 #[derive(Serialize)]

@@ -5,10 +5,10 @@
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
-use super::{Rows, flow_table, slack_table};
+use super::{Rows, cap_slack_table, flow_table, slack_table};
 use crate::core::BoxError;
 use crate::core::traits::Store;
-use crate::core::types::{Assignment, SinkList, Slack, SourceList};
+use crate::core::types::{Assignment, CapSlack, SinkList, Slack, SourceList, Table};
 
 /// Writes the assignment to a JSON file, one line per flow.
 #[derive(Debug, Clone)]
@@ -40,6 +40,16 @@ impl JsonStore {
         sources: &SourceList,
     ) -> Result<(), BoxError> {
         write_table(writer, slack_table(slack, sources))
+    }
+
+    /// Writes how much of each source cap is used as JSON to any writer.
+    pub fn write_cap_slack(
+        &self,
+        writer: impl Write,
+        slack: &[CapSlack],
+        caps: &Table,
+    ) -> Result<(), BoxError> {
+        write_table(writer, cap_slack_table(slack, caps))
     }
 }
 
@@ -81,6 +91,14 @@ impl Store for JsonStore {
             BufWriter::new(std::fs::File::create(&self.path)?),
             slack,
             sources,
+        )
+    }
+
+    fn store_cap_slack(&self, slack: &[CapSlack], caps: &Table) -> Result<(), BoxError> {
+        self.write_cap_slack(
+            BufWriter::new(std::fs::File::create(&self.path)?),
+            slack,
+            caps,
         )
     }
 }

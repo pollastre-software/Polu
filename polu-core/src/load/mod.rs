@@ -14,7 +14,7 @@
 //!
 //! Source caps: read like sources, with any of the source columns plus one quantity column. Each row caps
 //! the total out of the source rows that have every value it sets, and gets no routes of its own, so a
-//! business total doesn't need a business-only source row. Caps that match no source row are ignored.
+//! business total doesn't need a business-only source row. Caps that match no source row bound nothing.
 //!
 //! | business  | cap |
 //! |-----------|-----|

@@ -4,13 +4,13 @@ use std::path::PathBuf;
 
 use rust_xlsxwriter::{Format, Workbook};
 
-use super::{Rows, flow_table, slack_table};
+use super::{Rows, cap_slack_table, flow_table, slack_table};
 use crate::core::BoxError;
 use crate::core::traits::Store;
-use crate::core::types::{Assignment, SinkList, Slack, SourceList};
+use crate::core::types::{Assignment, CapSlack, SinkList, Slack, SourceList, Table};
 
 /// Writes the assignment to one sheet of a new xlsx file, one row per flow. Slack goes to a sheet
-/// named `slack`.
+/// named `slack`, cap slack to one named `caps`.
 #[derive(Debug, Clone)]
 pub struct XlsxStore {
     path: PathBuf,
@@ -48,6 +48,15 @@ impl XlsxStore {
         sources: &SourceList,
     ) -> Result<Workbook, BoxError> {
         workbook("slack", slack_table(slack, sources))
+    }
+
+    /// How much of each source cap is used, as a workbook.
+    pub fn cap_slack_workbook(
+        &self,
+        slack: &[CapSlack],
+        caps: &Table,
+    ) -> Result<Workbook, BoxError> {
+        workbook("caps", cap_slack_table(slack, caps))
     }
 }
 
@@ -89,5 +98,9 @@ impl Store for XlsxStore {
 
     fn store_slack(&self, slack: &[Slack], sources: &SourceList) -> Result<(), BoxError> {
         Ok(self.slack_workbook(slack, sources)?.save(&self.path)?)
+    }
+
+    fn store_cap_slack(&self, slack: &[CapSlack], caps: &Table) -> Result<(), BoxError> {
+        Ok(self.cap_slack_workbook(slack, caps)?.save(&self.path)?)
     }
 }

@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use ::csv::WriterBuilder;
 
-use super::{Rows, flow_table, slack_table};
+use super::{Rows, cap_slack_table, flow_table, slack_table};
 use crate::core::BoxError;
 use crate::core::traits::Store;
-use crate::core::types::{Assignment, SinkList, Slack, SourceList};
+use crate::core::types::{Assignment, CapSlack, SinkList, Slack, SourceList, Table};
 
 /// Writes the assignment to a CSV file, one line per flow.
 #[derive(Debug, Clone)]
@@ -51,6 +51,16 @@ impl CsvStore {
         self.write_table(writer, slack_table(slack, sources))
     }
 
+    /// Writes how much of each source cap is used as CSV to any writer.
+    pub fn write_cap_slack(
+        &self,
+        writer: impl Write,
+        slack: &[CapSlack],
+        caps: &Table,
+    ) -> Result<(), BoxError> {
+        self.write_table(writer, cap_slack_table(slack, caps))
+    }
+
     fn write_table(
         &self,
         writer: impl Write,
@@ -91,5 +101,9 @@ impl Store for CsvStore {
 
     fn store_slack(&self, slack: &[Slack], sources: &SourceList) -> Result<(), BoxError> {
         self.write_slack(std::fs::File::create(&self.path)?, slack, sources)
+    }
+
+    fn store_cap_slack(&self, slack: &[CapSlack], caps: &Table) -> Result<(), BoxError> {
+        self.write_cap_slack(std::fs::File::create(&self.path)?, slack, caps)
     }
 }

@@ -73,8 +73,9 @@ const model = new Model(
 );
 const { objective, flows } = model.solve(); // flows index into model.sources().rows / model.sinks().rows
 model.slack(); // unused capacity per source row
+model.capSlack(); // how much of each source cap is used, one entry per caps row
 model.trace(source, sink); // how one pair's cost was reached, layer by layer
-model.exportFlows("xlsx"); // Uint8Array; also "csv", "json", and exportSlack(...)
+model.exportFlows("xlsx"); // Uint8Array; also "csv", "json", exportSlack(...) and exportCapSlack(...)
 model.free(); // release the Rust side when done
 ```
 
