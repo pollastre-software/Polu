@@ -57,26 +57,47 @@ impl Format {
     }
 }
 
-/// One input: a file, plus the sheet for Excel files.
+/// One input: a file, plus for Excel files either a sheet or a named table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileRef {
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet: Option<String>,
+    /// A named Excel table (a ListObject), read instead of a whole sheet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
 }
 
 impl FileRef {
-    /// The file name and sheet, for lists.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            sheet: None,
+            table: None,
+        }
+    }
+
+    /// The file name and its sheet or table, for lists.
     pub fn label(&self) -> String {
         let name = self.path.file_name().map_or_else(
             || self.path.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
-        match &self.sheet {
-            Some(sheet) => format!("{name} [{sheet}]"),
-            None => name,
+        match (&self.table, &self.sheet) {
+            (Some(table), _) => format!("{name} [table {table}]"),
+            (None, Some(sheet)) => format!("{name} [{sheet}]"),
+            (None, None) => name,
         }
     }
+}
+
+/// A sheet or named table of an Excel file, for the picker: the input it makes and its columns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Region {
+    pub file: FileRef,
+    /// The sheet a table is on; `None` for a sheet.
+    pub on_sheet: Option<String>,
+    pub columns: Vec<String>,
 }
 
 /// Sources, sinks or source caps: the file and its quantity column.
@@ -173,15 +194,36 @@ pub fn op_label(op: Op) -> &'static str {
     }
 }
 
-/// The sheets of an Excel file, or `None` for other formats.
-pub fn sheets(path: &Path) -> Result<Option<Vec<String>>, BoxError> {
+/// The sheets of an Excel file, each followed by the named tables on it, or `None` for other
+/// formats.
+pub fn regions(path: &Path) -> Result<Option<Vec<Region>>, BoxError> {
     if Format::check(path)? != Format::Excel {
         return Ok(None);
     }
     #[cfg(feature = "xlsx")]
-    return Ok(Some(polu_core::load::xlsx::sheet_names(&std::fs::read(
-        path,
-    )?)?));
+    return {
+        use polu_core::load::xlsx::{self, Region as Part};
+        let found = xlsx::regions(&std::fs::read(path)?)?;
+        let region = |info: xlsx::RegionInfo| {
+            let mut file = FileRef::new(path);
+            let on_sheet = match info.region {
+                Part::Sheet(sheet) => {
+                    file.sheet = Some(sheet);
+                    None
+                }
+                Part::Table(table) => {
+                    file.table = Some(table);
+                    Some(info.sheet)
+                }
+            };
+            Region {
+                file,
+                on_sheet,
+                columns: info.columns,
+            }
+        };
+        Ok(Some(found.into_iter().map(region).collect()))
+    };
     #[cfg(not(feature = "xlsx"))]
     unreachable!("checked above")
 }
@@ -194,8 +236,10 @@ pub fn column_names(file: &FileRef) -> Result<Vec<String>, BoxError> {
         #[cfg(feature = "json")]
         Format::Json => polu_core::load::json::JsonTable::from_path(&file.path, "")?.column_names(),
         #[cfg(feature = "xlsx")]
-        Format::Excel => polu_core::load::xlsx::XlsxTable::from_path(&file.path, sheet(file)?, "")?
-            .column_names(),
+        Format::Excel => {
+            polu_core::load::xlsx::XlsxTable::from_path(&file.path, region(file)?, "")?
+                .column_names()
+        }
         #[allow(unreachable_patterns)]
         _ => unreachable!("checked above"),
     }
@@ -220,7 +264,7 @@ pub fn table_loader(input: &TableInput) -> Result<(Box<dyn Load<Table>>, Header)
         #[cfg(feature = "xlsx")]
         Format::Excel => {
             let table =
-                polu_core::load::xlsx::XlsxTable::from_path(&file.path, sheet(file)?, quantity)?;
+                polu_core::load::xlsx::XlsxTable::from_path(&file.path, region(file)?, quantity)?;
             let header = table.header()?;
             Ok((Box::new(table), header))
         }
@@ -276,10 +320,10 @@ pub fn costmap(
             #[cfg(feature = "xlsx")]
             Format::Excel => {
                 let cm = polu_core::load::xlsx::XlsxCostMap::from_path(&file.path, s, k)?;
-                let sheet = sheet(file)?;
+                let region = region(file)?;
                 match op {
-                    Some(op) => cm.layer(op, sheet),
-                    None => cm.base(sheet),
+                    Some(op) => cm.layer(op, region),
+                    None => cm.base(region),
                 }
                 .load()
             }
@@ -337,10 +381,13 @@ pub fn store(path: &Path) -> Result<Box<dyn Store>, BoxError> {
 }
 
 #[cfg(feature = "xlsx")]
-fn sheet(file: &FileRef) -> Result<&str, BoxError> {
-    file.sheet
-        .as_deref()
-        .ok_or_else(|| format!("{}: pick a sheet", file.path.display()).into())
+fn region(file: &FileRef) -> Result<polu_core::load::xlsx::Region, BoxError> {
+    use polu_core::load::xlsx::Region;
+    match (&file.table, &file.sheet) {
+        (Some(table), _) => Ok(Region::Table(table.clone())),
+        (None, Some(sheet)) => Ok(Region::Sheet(sheet.clone())),
+        (None, None) => Err(format!("{}: pick a sheet or table", file.path.display()).into()),
+    }
 }
 
 /// Files under `root` the TUI can read, skipping hidden folders and build output, at most `limit`.
@@ -416,7 +463,7 @@ mod tests {
     #[test]
     fn a_base_is_rules_when_it_has_source_or_sink_columns() {
         let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/apples");
-        let file = |path: PathBuf| FileRef { path, sheet: None };
+        let file = FileRef::new;
         assert!(base_is_rules(&file(samples.join("costs-set.csv"))));
         let matrix = std::env::temp_dir().join(format!("polu-tui-base-{}.csv", std::process::id()));
         std::fs::write(&matrix, "1,2\n3,nan\n").unwrap();
@@ -428,10 +475,7 @@ mod tests {
     fn scenario_paths_are_relative_to_the_scenario_file() {
         let dir = std::env::temp_dir().join(format!("polu-tui-scenario-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("data")).unwrap();
-        let file = |name: &str| FileRef {
-            path: dir.join("data").join(name),
-            sheet: None,
-        };
+        let file = |name: &str| FileRef::new(dir.join("data").join(name));
         let scenario = Scenario {
             sources: Some(TableInput {
                 file: file("sources.csv"),
@@ -442,7 +486,10 @@ mod tests {
                 quantity: "cap".into(),
             }),
             sinks: None,
-            base: None,
+            base: Some(FileRef {
+                table: Some("Base".into()),
+                ..file("book.xlsx")
+            }),
             layers: vec![LayerInput {
                 file: file("scale.csv"),
                 op: Op::Scale,
@@ -454,6 +501,8 @@ mod tests {
         assert!(text.contains(r#""path": "data/scale.csv""#), "{text}");
         assert!(text.contains(r#""op": "scale""#));
         assert!(text.contains(r#""path": "data/caps.csv""#), "{text}");
+        assert!(text.contains(r#""table": "Base""#), "{text}");
+        assert!(!text.contains(r#""sheet""#), "{text}");
         assert_eq!(Scenario::open(&path).unwrap(), scenario);
         std::fs::remove_dir_all(&dir).ok();
     }

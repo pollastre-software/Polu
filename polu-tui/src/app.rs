@@ -174,8 +174,15 @@ pub enum Popup {
 }
 
 pub enum Pick {
-    Sheet { slot: Slot, path: PathBuf },
-    Quantity { slot: Slot, file: FileRef },
+    /// A sheet or named table of an Excel file; `options` holds their labels.
+    Region {
+        slot: Slot,
+        regions: Vec<io::Region>,
+    },
+    Quantity {
+        slot: Slot,
+        file: FileRef,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -910,38 +917,28 @@ impl App {
                 title,
                 options,
                 mut selected,
-            } => match key.code {
-                KeyCode::Enter => {
-                    let choice = options[selected].clone();
-                    self.picked(purpose, choice);
+            } => {
+                let last = options.len().saturating_sub(1);
+                match key.code {
+                    KeyCode::Enter => {
+                        let choice = options[selected].clone();
+                        return self.picked(purpose, selected, choice);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1).min(last),
+                    KeyCode::PageUp => selected = selected.saturating_sub(PAGE),
+                    KeyCode::PageDown => selected = (selected + PAGE).min(last),
+                    KeyCode::Home => selected = 0,
+                    KeyCode::End => selected = last,
+                    _ => {}
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    selected = selected.saturating_sub(1);
-                    self.popup = Some(Popup::Pick {
-                        purpose,
-                        title,
-                        options,
-                        selected,
-                    });
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    selected = (selected + 1).min(options.len() - 1);
-                    self.popup = Some(Popup::Pick {
-                        purpose,
-                        title,
-                        options,
-                        selected,
-                    });
-                }
-                _ => {
-                    self.popup = Some(Popup::Pick {
-                        purpose,
-                        title,
-                        options,
-                        selected,
-                    })
-                }
-            },
+                self.popup = Some(Popup::Pick {
+                    purpose,
+                    title,
+                    options,
+                    selected,
+                });
+            }
             Popup::Prompt {
                 purpose,
                 title,
@@ -973,31 +970,31 @@ impl App {
         }
     }
 
-    /// After the file search: Excel asks for a sheet, sources and sinks for the quantity column.
+    /// After the file search: Excel asks for a sheet or named table, sources and sinks for the
+    /// quantity column.
     pub fn picked_file(&mut self, slot: Slot, path: PathBuf) {
-        match io::sheets(&path) {
+        match io::regions(&path) {
             Err(e) => self.error(e),
-            Ok(Some(sheets)) => {
+            Ok(Some(regions)) if regions.is_empty() => {
+                self.error(format!("{}: no sheets", path.display()))
+            }
+            Ok(Some(regions)) => {
                 self.popup = Some(Popup::Pick {
-                    purpose: Pick::Sheet { slot, path },
-                    title: "Sheet".into(),
-                    options: sheets,
+                    options: regions.iter().map(|r| r.file.label()).collect(),
+                    purpose: Pick::Region { slot, regions },
+                    title: "Sheet or table".into(),
                     selected: 0,
                 });
             }
-            Ok(None) => self.picked_input(slot, FileRef { path, sheet: None }),
+            Ok(None) => self.picked_input(slot, FileRef::new(path)),
         }
     }
 
-    fn picked(&mut self, purpose: Pick, choice: String) {
+    fn picked(&mut self, purpose: Pick, selected: usize, choice: String) {
         match purpose {
-            Pick::Sheet { slot, path } => self.picked_input(
-                slot,
-                FileRef {
-                    path,
-                    sheet: Some(choice),
-                },
-            ),
+            Pick::Region { slot, mut regions } => {
+                self.picked_input(slot, regions.swap_remove(selected).file)
+            }
             Pick::Quantity { slot, file } => {
                 let input = TableInput {
                     file,
@@ -1502,10 +1499,7 @@ pub(crate) mod tests {
         let mut app = App::new(sample(""));
         app.open_scenario(&sample("apples.polu.json"));
         app.scenario.caps = Some(TableInput {
-            file: FileRef {
-                path: caps.clone(),
-                sheet: None,
-            },
+            file: FileRef::new(caps.clone()),
             quantity: "cap".into(),
         });
         press(&mut app, "l");
@@ -1520,6 +1514,40 @@ pub(crate) mod tests {
         press(&mut app, "4s");
         app.wait();
         assert_eq!(app.assignment().unwrap().objective, 26.0);
+    }
+
+    #[cfg(feature = "xlsx")]
+    #[test]
+    fn excel_files_list_their_sheets_with_columns() {
+        let mut app = App::new(sample(""));
+        key(&mut app, KeyCode::Enter);
+        press(&mut app, "apples.xlsx");
+        key(&mut app, KeyCode::Enter);
+        let Some(Popup::Pick {
+            purpose: Pick::Region { regions, .. },
+            options,
+            ..
+        }) = &app.popup
+        else {
+            panic!("no sheet or table pick")
+        };
+        assert_eq!(options.len(), regions.len());
+        let sources = (regions.iter())
+            .position(|r| r.file.sheet.as_deref() == Some("sources"))
+            .unwrap();
+        assert_eq!(regions[sources].columns, ["business", "size", "capacity"]);
+        assert_eq!(regions[sources].on_sheet, None);
+        for _ in 0..sources {
+            key(&mut app, KeyCode::Down);
+        }
+        // then the quantity column, guessed as `capacity`
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Enter);
+        let input = app.scenario.sources.as_ref().unwrap();
+        assert_eq!(input.file.sheet.as_deref(), Some("sources"));
+        assert_eq!(input.file.table, None);
+        assert_eq!(input.quantity, "capacity");
+        assert_eq!(input.file.label(), "apples.xlsx [sources]");
     }
 
     #[test]

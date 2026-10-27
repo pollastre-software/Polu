@@ -68,7 +68,7 @@ fn hint(app: &App) -> &'static str {
         return "Enter apply · Esc cancel · Ctrl+C quit";
     }
     if app.popup.is_some() {
-        return "↑↓ select · Enter pick · Esc close · Ctrl+C quit";
+        return "↑↓ PgUp PgDn select · Enter pick · Esc close · Ctrl+C quit";
     }
     match app.tab {
         Tab::Inputs => {
@@ -628,25 +628,55 @@ fn popup(frame: &mut Frame, app: &mut App) {
             selected,
         } => {
             let file = match purpose {
-                Pick::Sheet { path, .. } => path.display().to_string(),
+                Pick::Region { regions, .. } => (regions.first())
+                    .map(|r| r.file.path.display().to_string())
+                    .unwrap_or_default(),
                 Pick::Quantity { file, .. } => file.label(),
             };
-            let lines: Vec<Line> = options
-                .iter()
-                .enumerate()
-                .map(|(n, o)| {
-                    let line = Line::from(o.as_str());
-                    if n == *selected {
-                        line.style(SELECTED)
-                    } else {
-                        line
-                    }
-                })
-                .collect();
-            frame.render_widget(
-                Paragraph::new(lines).block(Block::bordered().title(format!(" {title}: {file} "))),
-                area,
-            );
+            let selected = *selected;
+            let mut block = Block::bordered().title(format!(" {title}: {file} "));
+            // a sheet or table takes two lines: its name, then its columns
+            let per = if matches!(purpose, Pick::Region { .. }) {
+                2
+            } else {
+                1
+            };
+            let fits = (block.inner(area).height as usize / per).max(1);
+            if options.len() > fits {
+                block = block.title_bottom(format!(" {} of {} ", selected + 1, options.len()));
+            }
+            let inner = block.inner(area);
+            let start = selected.saturating_sub(fits - 1);
+            let mut lines = Vec::new();
+            for n in start..options.len().min(start + fits) {
+                let style = if n == selected {
+                    SELECTED
+                } else {
+                    Style::new()
+                };
+                let Pick::Region { regions, .. } = &*purpose else {
+                    lines.push(Line::from(options[n].as_str()).style(style));
+                    continue;
+                };
+                let region = &regions[n];
+                let (kind, name) = match (&region.file.table, &region.file.sheet) {
+                    (Some(table), _) => ("table ", table.as_str()),
+                    (None, sheet) => ("sheet ", sheet.as_deref().unwrap_or_default()),
+                };
+                let mut head = vec![Span::from(kind).dark_gray(), Span::from(name).bold()];
+                if let Some(sheet) = &region.on_sheet {
+                    head.push(Span::from(format!("  on {sheet}")).dark_gray());
+                }
+                lines.push(Line::from(head).style(style));
+                let columns = match region.columns.len() {
+                    0 => "      empty".to_string(),
+                    1 => format!("      1 column: {}", region.columns[0]),
+                    n => format!("      {n} columns: {}", region.columns.join(", ")),
+                };
+                lines.push(Line::from(clip(&columns, inner.width as usize)).dark_gray());
+            }
+            frame.render_widget(block, area);
+            frame.render_widget(Paragraph::new(lines), inner);
         }
         Popup::Prompt { title, edit, .. } => {
             let area = Rect { height: 3, ..area };
@@ -662,8 +692,9 @@ const HELP: &str = "\
 Tabs        1-5 or Tab / Shift-Tab. l (re)loads the inputs from any tab.
             q quits (Esc out of a text field first); Ctrl+C quits from anywhere.
 
-Inputs      Enter opens the file search for the selected row. Excel files then ask for a
-            sheet; sources and sinks ask for the quantity column.
+Inputs      Enter opens the file search for the selected row. Excel files then list their
+            sheets and named tables, each with its columns; sources and sinks ask for the
+            quantity column. PgUp/PgDn and Home/End move through long lists.
             ←/→ change a layer's operator (set, scale, add, block); [ and ] move it.
             x removes the row. w saves the scenario, o opens one, r changes the search root.
             The base takes a headerless matrix, or a rule table (source./sink. columns)
@@ -765,6 +796,16 @@ fn edit_line(frame: &mut Frame, area: Rect, label: &str, edit: &LineEdit, active
     }
 }
 
+/// `text` cut to `width` characters, ending in `…` when cut.
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
 fn centered(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
     area.centered(
         Constraint::Percentage(width_percent),
@@ -827,6 +868,59 @@ mod tests {
                     + "\n"
             })
             .collect()
+    }
+
+    #[test]
+    fn the_excel_picker_shows_columns_and_scrolls() {
+        use crate::io::{FileRef, Region};
+        let region =
+            |sheet: Option<&str>, table: Option<&str>, on: Option<&str>, columns: &[&str]| Region {
+                file: FileRef {
+                    sheet: sheet.map(String::from),
+                    table: table.map(String::from),
+                    ..FileRef::new("book.xlsx")
+                },
+                on_sheet: on.map(String::from),
+                columns: columns.iter().map(|c| c.to_string()).collect(),
+            };
+        let mut regions = vec![
+            region(Some("data"), None, None, &["Fruit network"]),
+            region(
+                None,
+                Some("Sources"),
+                Some("data"),
+                &["business", "size", "capacity"],
+            ),
+            region(Some("notes"), None, None, &[]),
+        ];
+        regions
+            .extend((0..20).map(|n| region(Some(&format!("extra {n}")), None, None, &["a", "b"])));
+        let mut app = App::new(std::env::temp_dir());
+        app.popup = Some(Popup::Pick {
+            options: regions.iter().map(|r| r.file.label()).collect(),
+            purpose: Pick::Region {
+                slot: Slot::Sources,
+                regions,
+            },
+            title: "Sheet or table".into(),
+            selected: 1,
+        });
+        let text = screen(&mut app);
+        assert!(text.contains("table Sources  on data"), "{text}");
+        assert!(
+            text.contains("3 columns: business, size, capacity"),
+            "{text}"
+        );
+        assert!(text.contains("empty"), "{text}");
+        assert!(text.contains(" 2 of 23 "), "{text}");
+        // the list follows the selection past the bottom of the popup
+        let Some(Popup::Pick { selected, .. }) = &mut app.popup else {
+            unreachable!()
+        };
+        *selected = 22;
+        let text = screen(&mut app);
+        assert!(text.contains("sheet extra 19"), "{text}");
+        assert!(!text.contains("table Sources"), "{text}");
     }
 
     #[cfg(feature = "csv")]

@@ -1,9 +1,11 @@
 //! Excel loaders (xlsx, xlsm, xlsb, xls and ods). They read workbook bytes rather than open files,
 //! so the same loaders work from the CLI, WASM and Python; `from_path` is a native shortcut.
-//! Each table and layer is one sheet, laid out as described in [`crate::load`]; a sheet's first
-//! used row is its header.
+//! Each table and layer is one [`Region`] of a workbook, laid out as described in [`crate::load`]:
+//! a whole sheet, whose first used row is its header, or a named Excel table (.xlsx only), whose
+//! header row is the table's. [`regions`] lists both with their column names.
 
 use std::borrow::Cow;
+use std::fmt;
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,11 +17,107 @@ use crate::core::BoxError;
 use crate::core::traits::Load;
 use crate::core::types::{CostMap, Header, Layer, Op, Table};
 
-/// Sources or sinks from one sheet of a workbook, with the quantity column chosen by name.
+/// The part of a workbook a loader reads: a whole sheet, or a named Excel table (a ListObject,
+/// .xlsx only). A plain name is a sheet, so `XlsxTable::new(book, "sources", ..)` reads the
+/// `sources` sheet.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Region {
+    Sheet(String),
+    Table(String),
+}
+
+impl Region {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Sheet(name) | Self::Table(name) => name,
+        }
+    }
+}
+
+impl From<&str> for Region {
+    fn from(sheet: &str) -> Self {
+        Self::Sheet(sheet.into())
+    }
+}
+
+impl From<String> for Region {
+    fn from(sheet: String) -> Self {
+        Self::Sheet(sheet)
+    }
+}
+
+impl fmt::Display for Region {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sheet(name) => write!(f, "sheet `{name}`"),
+            Self::Table(name) => write!(f, "table `{name}`"),
+        }
+    }
+}
+
+/// One sheet or named table of a workbook and its column names, for a user to pick from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegionInfo {
+    pub region: Region,
+    /// The sheet it's on; a sheet's own name for a sheet.
+    pub sheet: String,
+    /// The header row without trailing blanks, empty when the sheet is empty.
+    pub columns: Vec<String>,
+}
+
+/// Every sheet in workbook order, each followed by the named tables on it.
+pub fn regions(workbook: &[u8]) -> Result<Vec<RegionInfo>, BoxError> {
+    let mut book = self::workbook(workbook)?;
+    if let Sheets::Xlsx(xlsx) = &mut book {
+        xlsx.load_tables()?;
+    }
+    let mut found = Vec::new();
+    for sheet in book.sheet_names() {
+        let mut columns: Vec<String> = (book.worksheet_range(&sheet).ok())
+            .and_then(|range| {
+                Some(
+                    header_row(&range)
+                        .ok()?
+                        .into_iter()
+                        .map(Cow::into_owned)
+                        .collect(),
+                )
+            })
+            .unwrap_or_default();
+        // the first row runs as wide as the sheet's widest row
+        while columns.last().is_some_and(String::is_empty) {
+            columns.pop();
+        }
+        found.push(RegionInfo {
+            region: Region::Sheet(sheet.clone()),
+            sheet: sheet.clone(),
+            columns,
+        });
+        if let Sheets::Xlsx(xlsx) = &mut book {
+            let tables: Vec<String> = xlsx
+                .table_names_in_sheet(&sheet)
+                .into_iter()
+                .cloned()
+                .collect();
+            for name in tables {
+                let columns = xlsx.table_by_name(&name)?.columns().to_vec();
+                found.push(RegionInfo {
+                    region: Region::Table(name),
+                    sheet: sheet.clone(),
+                    columns,
+                });
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Sources or sinks from one sheet or named table of a workbook, with the quantity column chosen
+/// by name.
 #[derive(Debug, Clone)]
 pub struct XlsxTable {
     workbook: Arc<[u8]>,
-    sheet: String,
+    region: Region,
     quantity_column: String,
 }
 
@@ -28,66 +126,66 @@ impl XlsxTable {
     /// sources, sinks and costmap layers from one file.
     pub fn new(
         workbook: impl Into<Arc<[u8]>>,
-        sheet: impl Into<String>,
+        region: impl Into<Region>,
         quantity_column: impl Into<String>,
     ) -> Self {
         Self {
             workbook: workbook.into(),
-            sheet: sheet.into(),
+            region: region.into(),
             quantity_column: quantity_column.into(),
         }
     }
 
     pub fn from_path(
         path: impl AsRef<Path>,
-        sheet: impl Into<String>,
+        region: impl Into<Region>,
         quantity_column: impl Into<String>,
     ) -> std::io::Result<Self> {
-        Ok(Self::new(std::fs::read(path)?, sheet, quantity_column))
+        Ok(Self::new(std::fs::read(path)?, region, quantity_column))
     }
 
     /// The category columns, in slot order. Pass these to [`XlsxCostMap::new`].
     pub fn header(&self) -> Result<Header, BoxError> {
-        let range = sheet(&mut workbook(&self.workbook)?, &self.sheet)?;
+        let range = read(&mut workbook(&self.workbook)?, &self.region)?;
         Ok(self.columns(&range)?.header)
     }
 
     /// Every column name, the quantity column included, e.g. to let a user pick the quantity column.
     pub fn column_names(&self) -> Result<Vec<String>, BoxError> {
-        let range = sheet(&mut workbook(&self.workbook)?, &self.sheet)?;
-        let header = header_row(&range).map_err(|e| format!("sheet `{}`: {e}", self.sheet))?;
+        let range = read(&mut workbook(&self.workbook)?, &self.region)?;
+        let header = header_row(&range).map_err(|e| format!("{}: {e}", self.region))?;
         Ok(header.into_iter().map(Cow::into_owned).collect())
     }
 
     fn columns(&self, range: &Range<Data>) -> Result<TableColumns, BoxError> {
-        let header = header_row(range).map_err(|e| format!("sheet `{}`: {e}", self.sheet))?;
+        let header = header_row(range).map_err(|e| format!("{}: {e}", self.region))?;
         TableColumns::new(&header, &self.quantity_column)
-            .map_err(|e| format!("sheet `{}`: {e}", self.sheet).into())
+            .map_err(|e| format!("{}: {e}", self.region).into())
     }
 }
 
 impl Load<Table> for XlsxTable {
     fn load(&self) -> Result<Table, BoxError> {
-        let range = sheet(&mut workbook(&self.workbook)?, &self.sheet)?;
+        let range = read(&mut workbook(&self.workbook)?, &self.region)?;
         let columns = self.columns(&range)?;
         let mut rows = Vec::new();
         for (row, cells) in body(&range) {
-            let at = |e| format!("sheet `{}` row {row}: {e}", self.sheet);
+            let at = |e| format!("{} row {row}: {e}", self.region);
             rows.push(columns.row(&texts(cells).map_err(at)?).map_err(at)?);
         }
         Ok(Table::new(columns.header, rows)?)
     }
 }
 
-/// A layered costmap from one workbook: an optional base matrix sheet, then one sheet per layer,
-/// applied in order.
+/// A layered costmap from one workbook: an optional base matrix, then one sheet or named table per
+/// layer, applied in order.
 #[derive(Debug, Clone)]
 pub struct XlsxCostMap {
     workbook: Arc<[u8]>,
     source_header: Header,
     sink_header: Header,
-    base: Option<String>,
-    layers: Vec<(Op, String)>,
+    base: Option<Region>,
+    layers: Vec<(Op, Region)>,
 }
 
 impl XlsxCostMap {
@@ -109,15 +207,16 @@ impl XlsxCostMap {
         Ok(Self::new(std::fs::read(path)?, source_header, sink_header))
     }
 
-    /// The base matrix sheet. Excel trims empty trailing columns, so write `nan` in the last
+    /// The base matrix: a headerless sheet, or a named table whose header row is skipped (e.g. to
+    /// label the sinks). Excel trims empty trailing columns of a sheet, so write `nan` in the last
     /// sink's column when none of its pairs can be used.
-    pub fn base(mut self, sheet: impl Into<String>) -> Self {
-        self.base = Some(sheet.into());
+    pub fn base(mut self, region: impl Into<Region>) -> Self {
+        self.base = Some(region.into());
         self
     }
 
-    pub fn layer(mut self, op: Op, sheet: impl Into<String>) -> Self {
-        self.layers.push((op, sheet.into()));
+    pub fn layer(mut self, op: Op, region: impl Into<Region>) -> Self {
+        self.layers.push((op, region.into()));
         self
     }
 
@@ -137,21 +236,23 @@ impl Load<CostMap> for XlsxCostMap {
     fn load(&self) -> Result<CostMap, BoxError> {
         let mut book = workbook(&self.workbook)?;
         let mut layers = Vec::new();
-        for (l, (op, name)) in self.layers.iter().enumerate() {
-            let range = sheet(&mut book, name)?;
+        for (l, (op, region)) in self.layers.iter().enumerate() {
+            let range = read(&mut book, region)?;
             let layer = self
                 .parse_layer(*op, &range)
-                .map_err(|e| format!("costmap layer {l} (sheet `{name}`): {e}"))?;
+                .map_err(|e| format!("costmap layer {l} ({region}): {e}"))?;
             layers.push(layer);
         }
         let costmap = CostMap::new(self.source_header.clone(), self.sink_header.clone(), layers)?;
-        let Some(name) = &self.base else {
+        let Some(region) = &self.base else {
             return Ok(costmap);
         };
-        let range = sheet(&mut book, name)?;
+        let range = read(&mut book, region)?;
+        // a table's header row labels the matrix; a sheet's matrix has none
+        let skip = matches!(region, Region::Table(_)) as usize;
         let first = range.start().map_or(0, |(row, _)| row as usize + 1);
         let mut costs = Vec::with_capacity(range.width() * range.height());
-        for (r, cells) in range.rows().enumerate() {
+        for (r, cells) in range.rows().enumerate().skip(skip) {
             for cell in cells {
                 let cost = match cell {
                     Data::Float(v) => Ok(*v),
@@ -160,8 +261,7 @@ impl Load<CostMap> for XlsxCostMap {
                     Data::String(s) => base_cost(s.trim()),
                     other => Err(format!("`{other}` is not a cost").into()),
                 };
-                costs
-                    .push(cost.map_err(|e| format!("base sheet `{name}` row {}: {e}", first + r))?);
+                costs.push(cost.map_err(|e| format!("base {region} row {}: {e}", first + r))?);
             }
         }
         Ok(costmap.with_base(costs)?)
@@ -179,6 +279,14 @@ fn workbook(bytes: &[u8]) -> Result<Workbook<'_>, BoxError> {
     Ok(open_workbook_auto_from_rs(Cursor::new(bytes))?)
 }
 
+/// A region's cells, header row first.
+fn read(book: &mut Workbook, region: &Region) -> Result<Range<Data>, BoxError> {
+    match region {
+        Region::Sheet(name) => sheet(book, name),
+        Region::Table(name) => table(book, name),
+    }
+}
+
 fn sheet(book: &mut Workbook, name: &str) -> Result<Range<Data>, BoxError> {
     if !book.sheet_names().iter().any(|s| s == name) {
         return Err(format!("no `{name}` sheet").into());
@@ -186,6 +294,41 @@ fn sheet(book: &mut Workbook, name: &str) -> Result<Range<Data>, BoxError> {
     Ok(book
         .worksheet_range(name)
         .map_err(|e| format!("sheet `{name}`: {e}"))?)
+}
+
+/// A named table as a range: its column names on the row above its data, every cell at its
+/// place on the sheet, so errors name the sheet's own row numbers. A totals row is left out.
+fn table(book: &mut Workbook, name: &str) -> Result<Range<Data>, BoxError> {
+    let Sheets::Xlsx(xlsx) = book else {
+        return Err(
+            format!("no `{name}` table: named tables are read from .xlsx files only").into(),
+        );
+    };
+    xlsx.load_tables()?;
+    if !xlsx.table_names().iter().any(|t| *t == name) {
+        return Err(format!("no `{name}` table").into());
+    }
+    let table = xlsx
+        .table_by_name(name)
+        .map_err(|e| format!("table `{name}`: {e}"))?;
+    let (columns, data) = (table.columns(), table.data());
+    // a table with no data rows has no position; its rows then count from the top
+    let (row, col) = data.start().unwrap_or((1, 0));
+    let header = row.saturating_sub(1);
+    let width = columns.len().max(1) as u32;
+    let mut range = Range::new(
+        (header, col),
+        (header + data.height() as u32, col + width - 1),
+    );
+    for (c, column) in columns.iter().enumerate() {
+        range.set_value((header, col + c as u32), Data::String(column.clone()));
+    }
+    for (r, cells) in data.rows().enumerate() {
+        for (c, cell) in cells.iter().take(width as usize).enumerate() {
+            range.set_value((header + 1 + r as u32, col + c as u32), cell.clone());
+        }
+    }
+    Ok(range)
 }
 
 fn header_row(range: &Range<Data>) -> Result<Vec<Cow<'_, str>>, BoxError> {
@@ -374,6 +517,196 @@ mod tests {
                 .to_string()
                 .contains("costmap layer 0 (sheet `block`)")
         );
+    }
+
+    /// Writes `rows` (header first) at `(row, col)` and makes them the named table `name`.
+    fn put_table(
+        sheet: &mut rust_xlsxwriter::Worksheet,
+        name: &str,
+        (row, col): (u32, u16),
+        rows: &[&[&str]],
+    ) {
+        use rust_xlsxwriter::{Table as Listed, TableColumn};
+        for (r, cells) in rows.iter().enumerate() {
+            for (c, cell) in cells.iter().enumerate() {
+                let (r, c) = (row + r as u32, col + c as u16);
+                match cell.parse::<f64>() {
+                    _ if cell.is_empty() => continue,
+                    Ok(v) => sheet.write_number(r, c, v).unwrap(),
+                    Err(_) => sheet.write_string(r, c, *cell).unwrap(),
+                };
+            }
+        }
+        let columns: Vec<_> = rows[0]
+            .iter()
+            .map(|h| TableColumn::new().set_header(*h))
+            .collect();
+        let table = Listed::new().set_name(name).set_columns(&columns);
+        let (last_row, last_col) = (row + rows.len() as u32 - 1, col + rows[0].len() as u16 - 1);
+        sheet
+            .add_table(row, col, last_row, last_col, &table)
+            .unwrap();
+    }
+
+    /// The apples example with sources, the set layer and a base as named tables: `Sources` and
+    /// `Base` on a `data` sheet under a title, `Costs` at the top of `layers`, sinks on a sheet.
+    fn tables() -> Vec<u8> {
+        let mut book = Workbook::new();
+        let data = book.add_worksheet();
+        data.set_name("data").unwrap();
+        data.write_string(0, 0, "Fruit network").unwrap();
+        put_table(
+            data,
+            "Sources",
+            (2, 2),
+            &[
+                &["business", "size", "capacity"],
+                &["apple inc", "", "5"],
+                &["apple inc", "large", "3"],
+                &["apple inc", "small", "7"],
+                &["bananas and more", "", "20"],
+            ],
+        );
+        put_table(
+            data,
+            "Base",
+            (2, 7),
+            &[
+                &["stores and us", "ohio fruits"],
+                &["1", "2"],
+                &["3", "nan"],
+                &["5", "6"],
+                &["7", "8"],
+            ],
+        );
+        let sinks = book.add_worksheet();
+        sinks.set_name("sinks").unwrap();
+        for (r, row) in [
+            ["store", "state", "demand"],
+            ["stores and us", "WA", "3"],
+            ["ohio fruits", "OH", "6"],
+        ]
+        .iter()
+        .enumerate()
+        {
+            for (c, cell) in row.iter().enumerate() {
+                match cell.parse::<f64>() {
+                    Ok(v) => sinks.write_number(r as u32, c as u16, v).unwrap(),
+                    Err(_) => sinks.write_string(r as u32, c as u16, *cell).unwrap(),
+                };
+            }
+        }
+        let layers = book.add_worksheet();
+        layers.set_name("layers").unwrap();
+        put_table(
+            layers,
+            "Costs",
+            (0, 0),
+            &[
+                &["source.business", "sink.store", "value"],
+                &["apple inc", "stores and us", "2"],
+                &["apple inc", "ohio fruits", "1"],
+                &["bananas and more", "stores and us", "4"],
+                &["bananas and more", "ohio fruits", "3"],
+            ],
+        );
+        book.save_to_buffer().unwrap()
+    }
+
+    fn table(name: &str) -> Region {
+        Region::Table(name.into())
+    }
+
+    #[test]
+    fn named_tables_read_like_sheets() {
+        let sources = XlsxTable::new(tables(), table("Sources"), "capacity");
+        let loaded = sources.load().unwrap();
+        // the title above the table and the Base table beside it are left out
+        assert_eq!(names(loaded.header()), ["business", "size"]);
+        assert_eq!(loaded.rows().len(), 4);
+        assert_eq!(loaded.rows()[3].0.get_slot(0), Some("bananas and more"));
+        assert_eq!(loaded.rows()[3].1, 20);
+        assert_eq!(
+            sources.column_names().unwrap(),
+            ["business", "size", "capacity"]
+        );
+        // a plain name is still a sheet
+        let sinks = XlsxTable::new(tables(), "sinks", "demand").load().unwrap();
+        assert_eq!(sinks.rows().len(), 2);
+    }
+
+    #[test]
+    fn regions_list_each_sheet_then_its_tables() {
+        let found = regions(&tables()).unwrap();
+        let listed: Vec<(String, &str, usize)> = found
+            .iter()
+            .map(|r| (r.region.to_string(), r.sheet.as_str(), r.columns.len()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("sheet `data`".into(), "data", 1),
+                ("table `Sources`".into(), "data", 3),
+                ("table `Base`".into(), "data", 2),
+                ("sheet `sinks`".into(), "sinks", 3),
+                ("sheet `layers`".into(), "layers", 3),
+                ("table `Costs`".into(), "layers", 3),
+            ]
+        );
+        assert_eq!(found[0].columns, ["Fruit network"]);
+        assert_eq!(found[2].columns, ["stores and us", "ohio fruits"]);
+    }
+
+    #[test]
+    fn table_errors_name_the_table_and_its_sheet_row() {
+        let missing = XlsxTable::new(tables(), table("Stock"), "capacity")
+            .load()
+            .unwrap_err();
+        assert!(
+            missing.to_string().contains("no `Stock` table"),
+            "{missing}"
+        );
+        let column = XlsxTable::new(tables(), table("Sources"), "demand")
+            .load()
+            .unwrap_err();
+        assert!(
+            column
+                .to_string()
+                .contains("table `Sources`: no `demand` column"),
+            "{column}"
+        );
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        put_table(
+            sheet,
+            "T",
+            (3, 1),
+            &[&["business", "capacity"], &["a", "1"], &["b", "lots"]],
+        );
+        let bad = XlsxTable::new(book.save_to_buffer().unwrap(), table("T"), "capacity")
+            .load()
+            .unwrap_err();
+        // header on Excel row 4, so `lots` is on row 6
+        assert!(bad.to_string().contains("table `T` row 6"), "{bad}");
+    }
+
+    #[test]
+    fn layers_and_base_read_from_tables() {
+        let book: Arc<[u8]> = tables().into();
+        let sources = XlsxTable::new(book.clone(), table("Sources"), "capacity");
+        let sinks = XlsxTable::new(book.clone(), "sinks", "demand");
+        let cm = XlsxCostMap::new(book, sources.header().unwrap(), sinks.header().unwrap())
+            .layer(Op::Set, table("Costs"))
+            .base(table("Base"))
+            .load()
+            .unwrap();
+        assert_eq!(cm.layers()[0].rules.len(), 4);
+        assert_eq!(cm.layers()[0].rules[3].value, 3.0);
+        // the base table's header row names the sinks and is skipped
+        let base = cm.base().unwrap();
+        assert_eq!(base.len(), 8);
+        assert_eq!((base[0], base[2], base[7]), (1.0, 3.0, 8.0));
+        assert!(base[3].is_nan());
     }
 
     /// The CSV end-to-end example, read from one workbook and written back to another.
