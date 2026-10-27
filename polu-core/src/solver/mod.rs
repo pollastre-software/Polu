@@ -13,6 +13,11 @@ use crate::core::types::{Assignment, Limit, Problem};
 pub struct HighsSolver {
     /// Print HiGHS's own log to stdout.
     pub verbose: bool,
+    /// Run HiGHS's presolve, off by default. It finds nothing to remove in a transport problem but
+    /// takes most of the solve: a generated 700 x 600 network (420k routes) solved in about 50 s with
+    /// it and under 8 s without, to the same plan. It may pay off on harder models, e.g. caps that
+    /// overlap without nesting, where the MIP has to branch.
+    pub presolve: bool,
 }
 
 impl Solver for HighsSolver {
@@ -62,6 +67,9 @@ impl Solver for HighsSolver {
             .map_err(|status| format!("HiGHS rejected the problem: {status:?}"))?;
         if !self.verbose {
             model.make_quiet();
+        }
+        if !self.presolve {
+            model.set_option("presolve", "off");
         }
         let solved = model
             .try_solve()
