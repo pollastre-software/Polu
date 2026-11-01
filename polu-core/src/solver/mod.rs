@@ -8,7 +8,7 @@ use crate::core::types::{Assignment, Limit, Problem};
 
 /// Solves the transport problem as a MIP: one integer column per route, one `<=` row per supply limit
 /// and cap, and one `==` row per demand limit. A route counts towards every limit containing its source
-/// or sink.
+/// or sink, and every cap containing the route.
 #[derive(Debug, Clone, Default)]
 pub struct HighsSolver {
     /// Print HiGHS's own log to stdout.
@@ -34,11 +34,15 @@ impl Solver for HighsSolver {
         }
 
         let mut pb = ColProblem::default();
-        // caps are supply limits too, just not one per source row
         let supply: Vec<_> = problem
             .supply
             .iter()
-            .chain(&problem.caps)
+            .map(|l| pb.add_row(..=l.amount as f64))
+            .collect();
+        // caps are rows over routes, not over source rows
+        let caps: Vec<_> = problem
+            .caps
+            .iter()
             .map(|l| pb.add_row(..=l.amount as f64))
             .collect();
         let demand: Vec<_> = problem
@@ -46,17 +50,15 @@ impl Solver for HighsSolver {
             .iter()
             .map(|l| pb.add_row(l.amount as f64..=l.amount as f64))
             .collect();
-        let (in_supply, in_demand) = (
-            rows_per_member(
-                problem.supply.iter().chain(&problem.caps),
-                problem.supply.len(),
-                &supply,
-            ),
+        let (in_supply, in_caps, in_demand) = (
+            rows_per_member(&problem.supply, problem.supply.len(), &supply),
+            rows_per_member(&problem.caps, problem.routes.len(), &caps),
             rows_per_member(&problem.demand, problem.demand.len(), &demand),
         );
-        for route in &problem.routes {
+        for (r, route) in problem.routes.iter().enumerate() {
             let factors = in_supply[route.source]
                 .iter()
+                .chain(&in_caps[r])
                 .chain(&in_demand[route.sink])
                 .map(|&row| (row, 1.0));
             pb.add_integer_column(route.cost, 0.., factors);
@@ -86,7 +88,8 @@ impl Solver for HighsSolver {
     }
 }
 
-/// For each of a table's `table_rows` rows, the HiGHS rows of the limits it belongs to.
+/// For each of a table's `table_rows` rows (or each route, for caps), the HiGHS rows of the limits it
+/// belongs to.
 fn rows_per_member<'a>(
     limits: impl IntoIterator<Item = &'a Limit>,
     table_rows: usize,

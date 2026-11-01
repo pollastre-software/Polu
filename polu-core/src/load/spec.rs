@@ -40,7 +40,7 @@ pub trait Input {
     /// Every column name, the quantity column included, e.g. to let a user pick the quantity column.
     fn column_names(&self) -> Result<Vec<String>, BoxError>;
 
-    /// Sources, sinks or source caps, with `quantity` as the quantity column.
+    /// Sources, sinks or caps, with `quantity` as the quantity column.
     fn table(&self, quantity: &str) -> Result<Table, BoxError>;
 
     /// A costmap layer doing `op`; its `source.` and `sink.` columns name fields of these headers.
@@ -70,7 +70,7 @@ pub trait Input {
 /// Everything a run reads.
 pub struct Spec {
     pub sources: TableInput,
-    /// Caps over the source rows each of its rows matches, see [`Table::caps`].
+    /// Caps over the routes each of its rows matches, see [`Table::caps`].
     pub caps: Option<TableInput>,
     pub sinks: TableInput,
     /// A headerless cost matrix, or a rule table applied as a `Set` layer before the others.
@@ -78,7 +78,7 @@ pub struct Spec {
     pub layers: Vec<LayerInput>,
 }
 
-/// Sources, sinks or source caps: an input, the name errors call it by, and its quantity column.
+/// Sources, sinks or caps: an input, the name errors call it by, and its quantity column.
 pub struct TableInput {
     pub name: String,
     pub input: Box<dyn Input>,

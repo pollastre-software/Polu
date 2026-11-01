@@ -1,6 +1,6 @@
 //! polu-core for the browser, built with `wasm-pack build polu-wasm --target web` (see `demo/build.sh`).
 //!
-//! A [`Model`] loads sources, sinks, source caps and costmap layers from file contents (CSV, JSON
+//! A [`Model`] loads sources, sinks, caps and costmap layers from file contents (CSV, JSON
 //! or Excel, as in [`polu_core::load`]), formulates the problem, solves it with a JS LP solver (see
 //! [`solver::JsSolver`]), and hands back flows, unused capacity, cost traces and result files.
 //!
@@ -45,7 +45,9 @@ export interface PoluInput {
 }
 export interface PoluSpec {
   sources: PoluInput;
-  /** Source caps: each row caps the total out of the source rows it matches, with no routes of its own. */
+  /** Caps: each row caps the total along the routes from the source rows to the sink rows it matches
+   * (`sink.<column>` names a sink column, `source.<column>` or a bare name a source column), with no
+   * routes of its own. */
   caps?: PoluInput;
   sinks: PoluInput;
   /** A headerless cost matrix, or a rule table applied as a first `set` layer. */
@@ -79,7 +81,7 @@ export interface SolutionView {
   flows: { source: number; sink: number; units: number; cost: number }[];
 }
 export interface SlackView { used: number; amount: number; unused: number; spare: number }
-/** One source cap's use: `unused` is what it still allows, `percentUsed` is rounded down. */
+/** One cap's use: `unused` is what it still allows, `percentUsed` is rounded down. */
 export interface CapSlackView { used: number; amount: number; unused: number; percentUsed: number }
 /** A sheet or named table of a workbook; `sheet` is the sheet it's on (its own name for a sheet). */
 export interface RegionView {
@@ -144,7 +146,7 @@ impl Model {
         to_js(&TableView::new(self.tables().1))
     }
 
-    /// The source cap table, or `undefined` without one.
+    /// The cap table, or `undefined` without one.
     #[wasm_bindgen(unchecked_return_type = "TableView | undefined")]
     pub fn caps(&self) -> Result<JsValue, JsError> {
         match self.polu.source_caps() {
@@ -298,7 +300,7 @@ impl Model {
         Ok(out)
     }
 
-    /// How much of each source cap the last solution uses, one entry per row of [`Model::caps`];
+    /// How much of each cap the last solution uses, one entry per row of [`Model::caps`];
     /// empty without caps. See [`polu_core::Problem::cap_slack`].
     #[wasm_bindgen(js_name = capSlack, unchecked_return_type = "CapSlackView[]")]
     pub fn cap_slack(&self) -> Result<JsValue, JsError> {
@@ -317,15 +319,14 @@ impl Model {
         to_js(&slack)
     }
 
-    /// The use of each source cap in the last solution as a `csv`, `json` or `xlsx` file.
+    /// The use of each cap in the last solution as a `csv`, `json` or `xlsx` file.
     #[wasm_bindgen(js_name = exportCapSlack)]
     pub fn export_cap_slack(&self, format: &str) -> Result<Vec<u8>, JsError> {
         let slack = self
             .polu
             .cap_slack()
             .ok_or_else(|| JsError::new("call solve() first"))?;
-        let caps =
-            (self.polu.source_caps()).ok_or_else(|| JsError::new("there are no source caps"))?;
+        let caps = (self.polu.source_caps()).ok_or_else(|| JsError::new("there are no caps"))?;
         let mut out = Vec::new();
         match format {
             "csv" => CsvStore::new("").write_cap_slack(&mut out, &slack, caps),

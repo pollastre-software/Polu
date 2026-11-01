@@ -146,8 +146,9 @@ impl Polu {
         }
     }
 
-    /// Adds a source cap table: each of its rows caps the total flow out of the source rows it matches,
-    /// with no routes of its own (see [`Table::caps`]).
+    /// Adds a cap table: each of its rows caps the total flow along the routes from the source rows
+    /// to the sink rows it matches, with no routes of its own (see [`Table::caps`]). A cap that
+    /// names only source columns caps the total out of the source rows it matches.
     pub fn with_source_caps(mut self, caps_loader: Box<dyn Load<Table>>) -> Self {
         self.caps_loader = Some(caps_loader);
         self
@@ -166,7 +167,7 @@ impl Polu {
         self.solution = None;
         let mut problem = formulate(&sources, &sinks, &costmap)?;
         if let Some(caps) = &caps {
-            problem.caps = sources.caps(caps)?;
+            problem.caps = sources.caps(&sinks, caps, &problem.routes)?;
         }
         // kept so stores can label the flows and views can inspect them
         self.inputs = Some((sources, sinks, costmap));
@@ -210,7 +211,7 @@ impl Polu {
         self.inputs.as_ref().map(|(_, _, costmap)| costmap)
     }
 
-    /// The source cap table from the last `load_data()`, if one was added with `with_source_caps`.
+    /// The cap table from the last `load_data()`, if one was added with `with_source_caps`.
     pub fn source_caps(&self) -> Option<&Table> {
         self.caps.as_ref()
     }
@@ -228,7 +229,7 @@ impl Polu {
         Some(self.problem.as_ref()?.slack(self.solution.as_ref()?))
     }
 
-    /// How much of each source cap the last solution uses, see [`Problem::cap_slack`].
+    /// How much of each cap the last solution uses, see [`Problem::cap_slack`].
     pub fn cap_slack(&self) -> Option<Vec<CapSlack>> {
         Some(self.problem.as_ref()?.cap_slack(self.solution.as_ref()?))
     }
@@ -678,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn caps_limit_the_rows_they_match() {
+    fn caps_limit_the_routes_they_match() {
         let sources = Table::new(
             header(&["region", "site"]),
             vec![
@@ -689,32 +690,85 @@ mod tests {
             ],
         )
         .unwrap();
-        let rows = |caps: &[Limit]| caps.iter().map(|l| l.rows.clone()).collect::<Vec<_>>();
-
-        // columns are matched by name, so a cap table can name fewer columns, in any order
-        let by_site = Table::new(
-            header(&["site"]),
-            vec![(key(&["large"]), 6), (key(&["huge"]), 9)],
+        let sinks = Table::new(
+            header(&["region", "store"]),
+            vec![(key(&["ohio", "s1"]), 4), (key(&["texas", "s2"]), 6)],
         )
         .unwrap();
-        let caps = sources.caps(&by_site).unwrap();
+        // every pair but [apple inc, small] -> texas, in source then sink order
+        let routes: Vec<Route> = [(0, 0), (0, 1), (1, 0), (2, 0), (2, 1), (3, 0), (3, 1)]
+            .into_iter()
+            .map(|(source, sink)| Route {
+                source,
+                sink,
+                cost: 1.0,
+            })
+            .collect();
+        let caps = |names: &[&str], rows: Vec<(Key, i64)>| {
+            sources.caps(&sinks, &Table::new(header(names), rows).unwrap(), &routes)
+        };
+        let rows = |caps: Vec<Limit>| caps.into_iter().map(|l| l.rows).collect::<Vec<_>>();
+
+        // bare names are source columns, matched by name, so a cap table can name fewer columns,
+        // in any order; a source-only cap covers every route out of the rows it matches
+        let by_site = caps(&["site"], vec![(key(&["large"]), 6), (key(&["huge"]), 9)]).unwrap();
         // [large] covers both large rows; [huge] matches nothing and keeps an empty limit;
         // the partial [apple inc, *] row has no site, so no site cap reaches it
-        assert_eq!(rows(&caps), [vec![0, 3], vec![]]);
-        assert_eq!((caps[0].amount, caps[1].amount), (6, 9));
+        assert_eq!(rows(by_site.clone()), [vec![0, 1, 5, 6], vec![]]);
+        assert_eq!((by_site[0].amount, by_site[1].amount), (6, 9));
+        let by_region = caps(&["source.region"], vec![(key(&["apple inc"]), 8)]);
+        assert_eq!(rows(by_region.unwrap()), [vec![0, 1, 2, 3, 4]]);
 
-        let by_region = Table::new(header(&["region"]), vec![(key(&["apple inc"]), 8)]).unwrap();
-        assert_eq!(rows(&sources.caps(&by_region).unwrap()), [vec![0, 1, 2]]);
+        // `sink.` columns narrow a cap to the routes into the sink rows it matches; a pair without a
+        // route adds nothing
+        let into_texas = caps(
+            &["sink.region", "region"],
+            vec![
+                (key(&["texas", "apple inc"]), 2),
+                (key(&["texas", "*"]), 3),
+                (key(&["ohio", "cherries"]), 1),
+            ],
+        );
+        assert_eq!(
+            rows(into_texas.unwrap()),
+            [vec![1, 4], vec![1, 4, 6], vec![]]
+        );
 
-        let unknown = Table::new(header(&["store"]), vec![(key(&["WA"]), 1)]).unwrap();
-        assert!(matches!(sources.caps(&unknown), Err(PoluError::Invalid(_))));
+        let unknown = caps(&["store"], vec![(key(&["s1"]), 1)]);
+        assert!(matches!(unknown, Err(PoluError::Invalid(e)) if e.contains("source table")));
+        let unknown = caps(&["sink.site"], vec![(key(&["large"]), 1)]);
+        assert!(matches!(unknown, Err(PoluError::Invalid(e)) if e.contains("sink table")));
+        let twice = caps(&["region", "source.region"], vec![(key(&["a", "b"]), 1)]);
+        assert!(matches!(twice, Err(PoluError::Invalid(e)) if e.contains("twice")));
     }
 
     #[test]
     fn caps_count_towards_spare() {
-        // rows 0 and 1 have room of their own (10 and 10), but a cap of 6 spans both
+        // rows 0 and 1 have room of their own (10 and 10), but a cap of 6 spans every route out of
+        // both; row 2 has a second route that a cap of 1 leaves out
         let problem = Problem {
-            routes: vec![],
+            routes: vec![
+                Route {
+                    source: 0,
+                    sink: 0,
+                    cost: 1.0,
+                },
+                Route {
+                    source: 1,
+                    sink: 0,
+                    cost: 1.0,
+                },
+                Route {
+                    source: 2,
+                    sink: 0,
+                    cost: 1.0,
+                },
+                Route {
+                    source: 2,
+                    sink: 1,
+                    cost: 1.0,
+                },
+            ],
             supply: vec![
                 Limit {
                     rows: vec![0],
@@ -724,19 +778,36 @@ mod tests {
                     rows: vec![1],
                     amount: 10,
                 },
+                Limit {
+                    rows: vec![2],
+                    amount: 10,
+                },
             ],
-            caps: vec![Limit {
-                rows: vec![0, 1],
-                amount: 6,
-            }],
+            caps: vec![
+                Limit {
+                    rows: vec![0, 1],
+                    amount: 6,
+                },
+                Limit {
+                    rows: vec![2],
+                    amount: 1,
+                },
+            ],
             demand: vec![],
         };
         let shipped = Assignment {
-            flows: vec![Flow {
-                source: 0,
-                sink: 0,
-                units: 4,
-            }],
+            flows: vec![
+                Flow {
+                    source: 0,
+                    sink: 0,
+                    units: 4,
+                },
+                Flow {
+                    source: 2,
+                    sink: 0,
+                    units: 1,
+                },
+            ],
             objective: 0.0,
         };
         let slack = problem.slack(&shipped);
@@ -749,9 +820,75 @@ mod tests {
             (slack[1].used, slack[1].unused(), slack[1].spare),
             (0, 10, 2)
         );
-        // and the cap itself: 4 of 6 used, 2 left
-        let cap = &problem.cap_slack(&shipped)[0];
-        assert_eq!((cap.used, cap.unused(), cap.percent_used()), (4, 2, 66));
+        // row 2's full cap covers one of its routes, and the other still has room
+        assert_eq!(
+            (slack[2].used, slack[2].unused(), slack[2].spare),
+            (1, 9, 9)
+        );
+        // and the caps themselves: 4 of 6 used, 2 left; 1 of 1
+        let caps: Vec<_> = (problem.cap_slack(&shipped).iter())
+            .map(|c| (c.used, c.unused(), c.percent_used()))
+            .collect();
+        assert_eq!(caps, [(4, 2, 66), (1, 0, 100)]);
+    }
+
+    /// A buyer's cap on what it takes from some sellers: ohio fruits accepts at most 2 small apples,
+    /// so the rest of its demand comes from the dearer large ones, while texas still gets small
+    /// apples freely.
+    #[cfg(feature = "highs")]
+    #[test]
+    fn sink_caps_bound_the_routes_into_them() {
+        use crate::solver::HighsSolver;
+
+        let sources = Table::new(
+            header(&["region", "site"]),
+            vec![
+                (key(&["apple inc", "small"]), 20),
+                (key(&["apple inc", "large"]), 20),
+            ],
+        )
+        .unwrap();
+        let sinks = Table::new(
+            header(&["region", "store"]),
+            vec![(key(&["ohio fruits"]), 5), (key(&["texas fruits"]), 5)],
+        )
+        .unwrap();
+        let cm = costmap(vec![
+            rule(&["apple inc", "small"], &["*"], 0, 1.0),
+            rule(&["apple inc", "large"], &["*"], 0, 2.0),
+        ]);
+        let caps = Table::new(
+            header(&["sink.region", "site"]),
+            vec![(key(&["ohio fruits", "small"]), 2)],
+        )
+        .unwrap();
+        let mut polu = Polu::new(
+            Box::new(Fixed(sources)),
+            Box::new(Fixed(sinks)),
+            Box::new(Fixed(cm)),
+            Box::new(HighsSolver::default()),
+            Box::new(Capture(Rc::default())),
+        )
+        .with_source_caps(Box::new(Fixed(caps)));
+
+        // routes are (small, ohio), (small, texas), (large, ohio), (large, texas): the cap is the first
+        assert_eq!(polu.load_data().unwrap().caps[0].rows, [0]);
+        let mut flows: Vec<_> = (polu.run().unwrap().flows.iter())
+            .map(|f| (f.source, f.sink, f.units))
+            .collect();
+        flows.sort();
+        assert_eq!(flows, [(0, 0, 2), (0, 1, 5), (1, 0, 3)]);
+        let cap = &polu.cap_slack().unwrap()[0];
+        assert_eq!((cap.used, cap.unused(), cap.percent_used()), (2, 0, 100));
+        // the cap covers one of small's two routes, so small can still ship its 13 spare
+        let spare: Vec<i64> = polu.slack().unwrap().iter().map(|s| s.spare).collect();
+        assert_eq!(spare, [13, 17]);
+        assert!(
+            polu.problem()
+                .unwrap()
+                .to_lp()
+                .contains(" c0: + 1 x0 <= 2\n")
+        );
     }
 
     /// Business total 5 over [large] = 3 and [small] = 7: at most 5 apple inc units ship in total,
@@ -1027,8 +1164,8 @@ mod tests {
         .with_source_caps(Box::new(Fixed(caps)));
 
         let problem = polu.load_data().unwrap();
-        // one route per source row, the caps add none; the cherries cap matches nothing, so its
-        // limit is empty
+        // one route per source row, so route i is source row i; the caps add none, and the cherries
+        // cap matches nothing, so its limit is empty
         assert_eq!(problem.routes.len(), 3);
         assert_eq!(
             problem.caps,
@@ -1108,14 +1245,14 @@ mod tests {
                     amount: 4,
                 },
             ],
-            // a cap over sources 1 and 2; one over source 2 alone has no route and is left out
+            // a cap over route 1, and one that matches no route and is left out
             caps: vec![
                 Limit {
-                    rows: vec![1, 2],
+                    rows: vec![1],
                     amount: 2,
                 },
                 Limit {
-                    rows: vec![2],
+                    rows: vec![],
                     amount: 1,
                 },
             ],

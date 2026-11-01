@@ -3,7 +3,7 @@ mod source;
 
 mod costmap;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::core::PoluError;
 
@@ -104,41 +104,93 @@ impl Table {
             .collect()
     }
 
-    /// One limit per row of `caps`, over the rows of this table it matches: every field the cap sets
-    /// must be set and equal in the row (as `Scale`, `Add` and `Block` rules match). Cap columns are
-    /// matched to this table's columns by name. A cap that matches no row keeps an empty limit, so
-    /// limit `i` is always cap row `i`.
-    pub fn caps(&self, caps: &Table) -> Result<Vec<Limit>, PoluError> {
-        // (cap slot, table slot)
-        let mut slots = Vec::new();
+    /// One limit per row of `caps`, over the `routes` from a source row it matches to a sink row it
+    /// matches, where `self` is the source table. Cap columns are matched by name: `sink.<column>`
+    /// to the sink columns, `source.<column>` or a bare name to the source columns, so a cap table
+    /// of source columns alone caps every route out of the rows it matches. A row matches when every
+    /// field the cap sets on its side is set and equal in the row (as `Scale`, `Add` and `Block`
+    /// rules match). A cap that matches no route keeps an empty limit, so limit `i` is always cap
+    /// row `i`.
+    pub fn caps(
+        &self,
+        sinks: &Table,
+        caps: &Table,
+        routes: &[Route],
+    ) -> Result<Vec<Limit>, PoluError> {
+        // (cap slot, table slot), for the source side then the sink side
+        let mut slots: [Vec<(usize, usize)>; 2] = Default::default();
         for (c, name) in caps.header.iter().enumerate() {
             let Some(name) = name.as_deref() else {
                 continue;
             };
-            let slot = self
-                .header
-                .iter()
-                .position(|h| h.as_deref() == Some(name))
+            let (side, column) = cap_column(name);
+            let (table, slots) = match side {
+                "sink" => (sinks, &mut slots[1]),
+                _ => (self, &mut slots[0]),
+            };
+            let slot = (table.header.iter())
+                .position(|h| h.as_deref() == Some(column))
                 .ok_or_else(|| {
-                    PoluError::Invalid(format!("cap column `{name}` is not in the table"))
+                    PoluError::Invalid(format!("cap column `{name}` is not in the {side} table"))
                 })?;
+            if slots.iter().any(|&(_, s)| s == slot) {
+                return Err(PoluError::Invalid(format!(
+                    "cap columns name `{side}.{column}` twice"
+                )));
+            }
             slots.push((c, slot));
         }
-        let index = RowIndex::new(self);
+        let index = [RowIndex::new(self), RowIndex::new(sinks)];
+        // the routes out of each source row and into each sink row, so each cap walks its smaller side
+        let mut by_row = [
+            vec![Vec::new(); self.rows.len()],
+            vec![Vec::new(); sinks.rows.len()],
+        ];
+        for (r, route) in routes.iter().enumerate() {
+            by_row[0][route.source].push(r);
+            by_row[1][route.sink].push(r);
+        }
         Ok(caps
             .rows
             .iter()
             .map(|(cap, amount)| {
-                let mut fields: [Option<Box<str>>; SLOTS] = Default::default();
-                for &(c, slot) in &slots {
-                    fields[slot] = cap.0[c].clone();
-                }
+                let [sources, sinks] = [0, 1].map(|side| {
+                    let mut fields: [Option<Box<str>>; SLOTS] = Default::default();
+                    for &(c, slot) in &slots[side] {
+                        fields[slot] = cap.0[c].clone();
+                    }
+                    index[side].rows_matching(&Key(fields), false)
+                });
+                let size = |rows: &[usize], side: usize| -> usize {
+                    rows.iter().map(|&r| by_row[side][r].len()).sum()
+                };
+                let mut rows: Vec<usize> = if size(&sources, 0) <= size(&sinks, 1) {
+                    (sources.iter().flat_map(|&s| &by_row[0][s]))
+                        .filter(|&&r| sinks.binary_search(&routes[r].sink).is_ok())
+                        .copied()
+                        .collect()
+                } else {
+                    (sinks.iter().flat_map(|&k| &by_row[1][k]))
+                        .filter(|&&r| sources.binary_search(&routes[r].source).is_ok())
+                        .copied()
+                        .collect()
+                };
+                rows.sort_unstable();
                 Limit {
-                    rows: index.rows_matching(&Key(fields), false),
+                    rows,
                     amount: *amount,
                 }
             })
             .collect())
+    }
+}
+
+/// The side and column a cap column names: `sink.<column>` a sink column, `source.<column>` or a
+/// bare name a source column.
+pub(crate) fn cap_column(name: &str) -> (&'static str, &str) {
+    match name.strip_prefix("sink.") {
+        Some(column) => ("sink", column),
+        None => ("source", name.strip_prefix("source.").unwrap_or(name)),
     }
 }
 
@@ -150,7 +202,8 @@ pub struct Route {
     pub cost: f64,
 }
 
-/// Bound on the total flow through a group of table rows: one row plus every row it covers.
+/// Bound on the total flow through a group: of table rows for supply and demand (one row plus every
+/// row it covers), of routes for caps.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Limit {
     pub rows: Vec<usize>,
@@ -158,10 +211,11 @@ pub struct Limit {
 }
 
 /// Solver-neutral transport problem: minimise the sum of cost * flow over `routes`, with integer flows,
-/// total flow out of the rows of each `supply` and `caps` limit `<= amount` and total flow into the rows
-/// of each `demand` limit `== amount`. `supply[i]` and `demand[j]` belong to source row i and sink row j;
-/// `caps` come from a source cap table (see [`Table::caps`]): `caps[i]` is cap row `i`, and caps belong
-/// to no source row, so they add no routes.
+/// total flow out of the rows of each `supply` limit `<= amount`, total flow along the routes of each
+/// `caps` limit `<= amount` and total flow into the rows of each `demand` limit `== amount`.
+/// `supply[i]` and `demand[j]` belong to source row i and sink row j. `caps` come from a cap table
+/// (see [`Table::caps`]): `caps[i]` is cap row `i` and its `rows` index into `routes`, so caps are
+/// extra rows over the same columns and add no routes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Problem {
     pub routes: Vec<Route>,
@@ -175,12 +229,31 @@ impl Problem {
     /// Computed from the flows rather than read from the solver, so every solver reports it the same way.
     pub fn slack(&self, assignment: &Assignment) -> Vec<Slack> {
         let used = self.shipped(assignment);
-        // a row can ship more only while every limit over it, caps included, has room
+        // a row can ship more only while every limit over it has room: its supply limits, and the
+        // caps over every route out of it (a cap over some of them doesn't bound the row)
         let mut spare: Vec<i64> = vec![i64::MAX; self.supply.len()];
-        for limit in self.supply.iter().chain(&self.caps) {
+        for limit in &self.supply {
             let unused = limit.amount - used(limit);
             for &r in &limit.rows {
                 spare[r] = spare[r].min(unused);
+            }
+        }
+        let mut out = vec![0usize; self.supply.len()];
+        for route in &self.routes {
+            out[route.source] += 1;
+        }
+        let mut in_cap = vec![0usize; self.supply.len()];
+        for (cap, slack) in self.caps.iter().zip(self.cap_slack(assignment)) {
+            let source = |r: usize| self.routes[r].source;
+            for &r in &cap.rows {
+                in_cap[source(r)] += 1;
+            }
+            for &r in &cap.rows {
+                // the first route of a row takes its count, so the row's later routes see 0
+                let s = source(r);
+                if std::mem::take(&mut in_cap[s]) == out[s] {
+                    spare[s] = spare[s].min(slack.unused());
+                }
             }
         }
         self.supply
@@ -195,14 +268,21 @@ impl Problem {
             .collect()
     }
 
-    /// How much of each source cap `assignment` uses; `cap_slack[i]` belongs to cap row i. Empty
-    /// without caps.
+    /// How much of each cap `assignment` uses; `cap_slack[i]` belongs to cap row i. Empty without
+    /// caps.
     pub fn cap_slack(&self, assignment: &Assignment) -> Vec<CapSlack> {
-        let used = self.shipped(assignment);
+        let mut units = HashMap::new();
+        for flow in &assignment.flows {
+            *units.entry((flow.source, flow.sink)).or_insert(0) += flow.units;
+        }
+        let units = |r: usize| {
+            let route = &self.routes[r];
+            units.get(&(route.source, route.sink)).copied().unwrap_or(0)
+        };
         self.caps
             .iter()
             .map(|limit| CapSlack {
-                used: used(limit),
+                used: limit.rows.iter().map(|&r| units(r)).sum(),
                 amount: limit.amount,
             })
             .collect()
@@ -245,7 +325,7 @@ impl Problem {
         let (sources, sinks) = (self.supply.len(), self.demand.len());
         let (in_supply, in_caps, in_demand) = (
             members(&self.supply, sources, |r| r.source, &self.routes),
-            members(&self.caps, sources, |r| r.source, &self.routes),
+            self.caps.iter().map(|cap| cap.rows.clone()).collect(),
             members(&self.demand, sinks, |r| r.sink, &self.routes),
         );
         let mut lp = String::from("Minimize\n obj:");
@@ -325,7 +405,9 @@ pub struct Slack {
     /// The limit's amount.
     pub amount: i64,
     /// Units the row itself could still ship before some limit over it is full: the smallest
-    /// [`unused`](Slack::unused) of every limit that includes the row, caps included.
+    /// [`unused`](Slack::unused) of every supply limit that includes the row and of every cap over
+    /// all of its routes. A cap over only some of its routes doesn't bound the row; its use is in
+    /// [`Problem::cap_slack`].
     pub spare: i64,
 }
 
@@ -336,10 +418,10 @@ impl Slack {
     }
 }
 
-/// How much of one source cap a solution uses.
+/// How much of one cap a solution uses.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapSlack {
-    /// Units shipped from the source rows the cap matches.
+    /// Units shipped along the routes the cap matches.
     pub used: i64,
     /// The cap.
     pub amount: i64,

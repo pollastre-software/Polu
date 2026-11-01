@@ -223,7 +223,7 @@ impl Loaded {
         self.problem().routes.len()
     }
 
-    /// `, 2 caps` for the load message, naming caps that match no source row (they bound nothing).
+    /// `, 2 caps` for the load message, naming caps that match no route (they bound nothing).
     pub fn caps_note(&self) -> String {
         let Some(table) = self.polu.source_caps() else {
             return String::new();
@@ -237,7 +237,7 @@ impl Loaded {
             .count()
         {
             0 => format!(", {rows} caps"),
-            unmatched => format!(", {rows} caps ({unmatched} match no source)"),
+            unmatched => format!(", {rows} caps ({unmatched} match no route)"),
         }
     }
 
@@ -280,7 +280,7 @@ pub struct App {
     pub solve: SolveState,
     pub flows: ListView,
     pub show_usage: bool,
-    /// The flows path, the unused capacity (slack) path, then the source cap use path; `save_row`
+    /// The flows path, the unused capacity (slack) path, then the cap use path; `save_row`
     /// picks one.
     pub output: LineEdit,
     pub slack_output: LineEdit,
@@ -590,7 +590,7 @@ impl App {
         }
     }
 
-    /// The Save tab's selected path: flows, unused capacity or source cap use.
+    /// The Save tab's selected path: flows, unused capacity or cap use.
     pub fn save_path(&mut self) -> &mut LineEdit {
         match self.save_row {
             0 => &mut self.output,
@@ -599,7 +599,7 @@ impl App {
         }
     }
 
-    /// Writes the flows, the unused source capacity or the use of each source cap, with the store
+    /// Writes the flows, the unused source capacity or the use of each cap, with the store
     /// the path's extension picks.
     pub fn save_output(&mut self) {
         let path = PathBuf::from(self.save_path().text.trim());
@@ -608,7 +608,7 @@ impl App {
         }
         let no_caps = (self.loaded.as_ref()).is_none_or(|l| l.polu.source_caps().is_none());
         if self.save_row == 2 && no_caps {
-            return self.error("no source caps to save: add a caps file on the Inputs tab");
+            return self.error("no caps to save: add a caps file on the Inputs tab");
         }
         if path.exists() && self.overwrite.as_ref() != Some(&path) {
             self.overwrite = Some(path.clone());
@@ -640,7 +640,7 @@ impl App {
                 let caps = loaded.polu.source_caps().expect("checked above");
                 let slack = loaded.problem().cap_slack(assignment);
                 let result = io::store(&path).and_then(|store| store.store_cap_slack(&slack, caps));
-                (result, format!("use of {} source caps", slack.len()))
+                (result, format!("use of {} caps", slack.len()))
             }
         };
         match result {
@@ -1503,8 +1503,8 @@ pub(crate) mod tests {
         press(&mut app, "l");
         std::fs::remove_file(&caps).ok();
         let message = &app.message.as_ref().unwrap().1;
-        assert!(message.contains("2 caps (1 match no source)"), "{message}");
-        // the apple inc cap spans all three apple inc rows
+        assert!(message.contains("2 caps (1 match no route)"), "{message}");
+        // the apple inc cap spans the routes out of all three apple inc rows (one each, to ohio)
         let loaded = app.loaded.as_ref().unwrap();
         assert_eq!(loaded.problem().caps[0].rows, [0, 1, 2]);
 

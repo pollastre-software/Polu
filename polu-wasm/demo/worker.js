@@ -58,7 +58,7 @@ const calls = {
     return { text: text.slice(0, limit), length: text.length };
   },
 
-  /** `what` is flows, slack (unused source capacity) or caps (the use of each source cap). */
+  /** `what` is flows, slack (unused source capacity) or caps (the use of each cap). */
   export(send, what, format) {
     if (what === "flows") return model.exportFlows(format);
     return what === "caps" ? model.exportCapSlack(format) : model.exportSlack(format);

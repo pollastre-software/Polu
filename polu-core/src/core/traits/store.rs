@@ -18,7 +18,7 @@ pub trait Store {
         Err("this store doesn't write slack".into())
     }
 
-    /// Stores how much of each source cap is used, one entry per row of `caps` (see
+    /// Stores how much of each cap is used, one entry per row of `caps` (see
     /// [`crate::Problem::cap_slack`]). Optional, like `store_slack`.
     fn store_cap_slack(&self, slack: &[CapSlack], caps: &Table) -> Result<(), BoxError> {
         let _ = (slack, caps);

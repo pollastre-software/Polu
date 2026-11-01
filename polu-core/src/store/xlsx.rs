@@ -50,7 +50,7 @@ impl XlsxStore {
         workbook("slack", slack_table(slack, sources))
     }
 
-    /// How much of each source cap is used, as a workbook.
+    /// How much of each cap is used, as a workbook.
     pub fn cap_slack_workbook(
         &self,
         slack: &[CapSlack],

@@ -379,9 +379,10 @@ bananas and more,ohio fruits,3
             Box::new(HighsSolver::default()),
             Box::new(CsvStore::new(&path)),
         )
-        // loose enough not to change the plan; cherries matches no source
+        // loose enough not to change the plan; cherries matches no source, and the last caps what
+        // stores and us takes from anyone
         .with_source_caps(Box::new(CsvTable::new(
-            "business,cap\napple inc,8\nbananas and more,30\ncherries,1\n",
+            "business,sink.store,cap\napple inc,,8\nbananas and more,,30\ncherries,,1\n,stores and us,10\n",
             "cap",
         )));
         polu.load_data().unwrap();
@@ -430,10 +431,11 @@ bananas and more,ohio fruits,3
             .unwrap();
         assert_eq!(
             String::from_utf8(caps).unwrap(),
-            "source.business,used,cap,unused,percent_used\n\
-             apple inc,5,8,3,62\n\
-             bananas and more,4,30,26,13\n\
-             cherries,0,1,1,0\n"
+            "source.business,sink.store,used,cap,unused,percent_used\n\
+             apple inc,,5,8,3,62\n\
+             bananas and more,,4,30,26,13\n\
+             cherries,,0,1,1,0\n\
+             ,stores and us,3,10,7,30\n"
         );
     }
 }

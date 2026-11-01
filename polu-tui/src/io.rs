@@ -106,7 +106,7 @@ pub struct Region {
     pub columns: Vec<String>,
 }
 
-/// Sources, sinks or source caps: the file and its quantity column.
+/// Sources, sinks or caps: the file and its quantity column.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableInput {
     #[serde(flatten)]

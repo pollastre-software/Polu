@@ -131,7 +131,7 @@ fn inputs(frame: &mut Frame, area: Rect, app: &mut App) {
                     app.scenario.caps.as_ref().map(|i| i.file.label()),
                     Some(match &app.scenario.caps {
                         Some(i) => format!("quantity: {}", i.quantity),
-                        None => "source caps, optional".into(),
+                        None => "caps, optional".into(),
                     }),
                     loaded
                         .and_then(|ld| ld.polu.source_caps())
@@ -414,7 +414,7 @@ fn solve(frame: &mut Frame, area: Rect, app: &mut App) {
         let slack = problem.slack(a);
         let [left, right] =
             Layout::horizontal([Constraint::Fill(3), Constraint::Fill(2)]).areas(rest);
-        // source caps, under the sources: how much of each is used and what it still allows
+        // caps, under the sources: how much of each is used and what it still allows
         let caps = loaded.polu.source_caps();
         let (left, caps_area) = match caps {
             Some(caps) => {
@@ -507,7 +507,7 @@ fn solve(frame: &mut Frame, area: Rect, app: &mut App) {
             frame.render_widget(
                 Table::new(rows, widths)
                     .header(Row::new(names).dark_gray())
-                    .block(Block::bordered().title(" Source caps: shipped / cap, unused, % used ")),
+                    .block(Block::bordered().title(" Caps: shipped / cap, unused, % used ")),
                 area,
             );
         }
@@ -589,7 +589,7 @@ fn save(frame: &mut Frame, area: Rect, app: &mut App) {
             )
             .dark_gray(),
             Line::from(
-                "Caps writes each source cap's used, cap, unused (cap - used) and percent_used.",
+                "Caps writes each cap's used, cap, unused (cap - used) and percent_used.",
             )
             .dark_gray(),
             Line::from(format!(
@@ -634,7 +634,7 @@ fn popup(frame: &mut Frame, app: &mut App) {
         } => {
             let title = match slot {
                 Slot::Sources => " Sources file ",
-                Slot::Caps => " Source caps file (each row caps the source rows it matches) ",
+                Slot::Caps => " Caps file (each row caps the routes between the rows it matches) ",
                 Slot::Sinks => " Sinks file ",
                 Slot::Base => " Base file (a matrix, or rules applied first) ",
                 Slot::Layer(_) | Slot::NewLayer => " Layer file ",
@@ -762,10 +762,10 @@ Costs       o cycles the sort, h shows pairs with no route, t toggles the trace 
 Solve       s runs HiGHS in the background. u switches between the flows and each
             row's use against its capacity or demand (partial rows count every row they cap).
             Sources also show unused capacity (capacity - used) and spare: what the row could
-            still ship before it or any partial row over it is full. Source caps show what
-            ships under each cap, what it still allows and the share used.
+            still ship before it, a partial row over it or a cap over all its routes is full.
+            Caps show what ships under each, what it still allows and the share used.
 
-Save        ↑/↓ pick the flows, unused capacity or source cap path. Enter edits it, Enter
+Save        ↑/↓ pick the flows, unused capacity or cap use path. Enter edits it, Enter
             again writes it. The extension picks the format.";
 
 // ----- helpers -----
@@ -1029,10 +1029,10 @@ mod tests {
         app.show_usage = true;
         let text = screen(&mut app);
         assert!(
-            text.contains("Source caps: shipped / cap, unused, % used"),
+            text.contains("Caps: shipped / cap, unused, % used"),
             "{text}"
         );
-        // apple inc's cap is full; cherries matches no source and ships nothing
+        // apple inc's cap is full; cherries matches no route and ships nothing
         let row = |name: &str| {
             text.lines()
                 .find(|l| l.contains(name) && l.contains('%'))

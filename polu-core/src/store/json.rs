@@ -42,7 +42,7 @@ impl JsonStore {
         write_table(writer, slack_table(slack, sources))
     }
 
-    /// Writes how much of each source cap is used as JSON to any writer.
+    /// Writes how much of each cap is used as JSON to any writer.
     pub fn write_cap_slack(
         &self,
         writer: impl Write,

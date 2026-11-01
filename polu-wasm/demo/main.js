@@ -327,13 +327,13 @@ function renderCards() {
     }),
   ];
   if (spec.caps) {
-    cards.push(card("Source caps", spec.caps, {
+    cards.push(card("Caps", spec.caps, {
       extra: quantityPicker(spec.caps),
       onReplace: (i) => { spec.caps = { ...i, quantity: spec.caps.quantity }; renderCards(); changed(true); },
       onRemove: () => { spec.caps = null; renderCards(); changed(true); },
     }));
   } else {
-    const add = h("button", { type: "button", class: "ghost dashed" }, "+ Source caps (optional, drop a file here)");
+    const add = h("button", { type: "button", class: "ghost dashed" }, "+ Caps (optional, drop a file here)");
     // starts with the first source column as its header, so only rows are left to add
     add.onclick = () => {
       let column = "business";
@@ -602,10 +602,10 @@ function unusedTable() {
           h("td", { class: "num" }, fmt(s.spare)),
           bar(s.used, s.amount))))),
     capSlack?.length ? [
-      h("h3", {}, "Source caps"),
-      h("p", { class: "muted" }, "What ships under each cap, what it still allows, and how much of it is used. A full cap is why the rows under it have no spare."),
+      h("h3", {}, "Caps"),
+      h("p", { class: "muted" }, "What ships under each cap, what it still allows, and how much of it is used. A full cap over every route out of a row leaves that row no spare."),
       h("table", {},
-        h("thead", {}, h("tr", {}, ["Source cap", "Used", "Cap", "Unused", "Used %", ""].map((t) => h("th", {}, t)))),
+        h("thead", {}, h("tr", {}, ["Matches", "Used", "Cap", "Unused", "Used %", ""].map((t) => h("th", {}, t)))),
         h("tbody", {}, capSlack.map((c, i) =>
           h("tr", { class: c.unused === 0 ? "full" : null },
             h("td", {}, caps.rows[i].label),

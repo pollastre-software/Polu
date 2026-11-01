@@ -32,7 +32,7 @@ has to be served, by anything.
 
 ## Scenarios
 
-`demo-scenarios/` at the repository root holds one folder per scenario: its sources, source caps,
+`demo-scenarios/` at the repository root holds one folder per scenario: its sources, caps,
 sinks and costmap layers, plus one `*.polu.json` scenario file in the TUI's format (paths relative to it), so
 the TUI opens the same scenarios. The page lists every folder that has a scenario file; to add one,
 add a folder. `fruit` is the apples example.
@@ -73,7 +73,7 @@ const model = new Model(
 );
 const { objective, flows } = model.solve(); // flows index into model.sources().rows / model.sinks().rows
 model.slack(); // unused capacity per source row
-model.capSlack(); // how much of each source cap is used, one entry per caps row
+model.capSlack(); // how much of each cap is used, one entry per caps row
 model.trace(source, sink); // how one pair's cost was reached, layer by layer
 model.exportFlows("xlsx"); // Uint8Array; also "csv", "json", exportSlack(...) and exportCapSlack(...)
 model.free(); // release the Rust side when done
